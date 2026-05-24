@@ -240,10 +240,11 @@ if st.session_state.get("run_milp", False):
                     col4.metric("Discharge Income", f"+{income_discharge:.2f} €",
                                 help="Money earned by discharging at high prices")
 
-                    # Detailed per 15-min table (with color coding)
-                    st.markdown("#### 📋 Detailed MILP Schedule per 15-min slot")
-                    detail_df = milp_schedule[['datetime', 'price_eur_mwh', 'charge_kwh', 'discharge_kwh', 'net_revenue_eur', 'soc_pct']].copy()
-                    detail_df['slot_revenue_color'] = detail_df['net_revenue_eur'].apply(
+                    # Detailed table - only slots with actual Charge or Discharge action
+                    st.markdown("#### 📋 MILP Actions (only quarters with activity)")
+                    action_mask = (milp_schedule['charge_kwh'] > 0.01) | (milp_schedule['discharge_kwh'] > 0.01)
+                    detail_df = milp_schedule[action_mask][['datetime', 'price_eur_mwh', 'charge_kwh', 'discharge_kwh', 'net_revenue_eur', 'soc_pct']].copy()
+                    detail_df['Revenue Type'] = detail_df['net_revenue_eur'].apply(
                         lambda x: "🟢 Income" if x > 0 else ("🔴 Cost" if x < 0 else "⚪ Zero")
                     )
                     detail_df = detail_df.rename(columns={
@@ -254,7 +255,7 @@ if st.session_state.get("run_milp", False):
                         'net_revenue_eur': 'Slot Revenue (€)',
                         'soc_pct': 'SOC (%)'
                     })
-                    st.dataframe(detail_df, use_container_width=True, hide_index=True, height=300)
+                    st.dataframe(detail_df, use_container_width=True, hide_index=True, height=400)
 
                     # Optimal schedule plot
                     fig_milp = go.Figure()
