@@ -1,0 +1,8 @@
+streamlit>=1.32
+pandas>=2.0
+plotly>=5.20
+pathlib; python_version < "3.4"  # stdlib, but for safety
+# For future full backtester / optimization
+# matplotlib
+# pulp
+# pyarrow  # for parquet if needed
