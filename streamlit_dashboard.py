@@ -192,12 +192,40 @@ fig_actions.add_trace(go.Scatter(x=dis_pts['datetime'], y=dis_pts['price'], mode
 fig_actions.update_layout(title="Price + EMS Actions", xaxis_title="Time", yaxis_title="€/MWh")
 st.plotly_chart(fig_actions, use_container_width=True)
 
-# SOC and revenue
-fig_soc = px.line(sim, x='datetime', y='soc', title="Battery State of Charge (%)", color_discrete_sequence=['blue'])
+# SOC and revenue (improved with fixed 0-100% scale + min reserve line)
+fig_soc = px.line(sim, x='datetime', y='soc', title="Battery State of Charge (%) - Rule-based", color_discrete_sequence=['blue'])
+fig_soc.update_yaxes(range=[0, 100])
+fig_soc.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange", 
+                  annotation_text=f"Min {min_soc_pct}% SOC Reserve", annotation_position="top right")
 st.plotly_chart(fig_soc, use_container_width=True)
 
 fig_rev = px.area(sim, x='datetime', y='cum_rev', title="Cumulative Revenue (€) from Smart Charging/Discharging")
 st.plotly_chart(fig_rev, use_container_width=True)
+
+# ==================== COMBINED OVERLAY PLOTS (when MILP has been run) ====================
+if st.session_state.get("milp_schedule") is not None:
+    st.markdown("---")
+    st.subheader("📊 Combined View: Rule-based vs MILP (Overlay)")
+
+    milp_df = st.session_state.milp_schedule
+
+    # Combined SOC plot
+    fig_combined_soc = go.Figure()
+    fig_combined_soc.add_trace(go.Scatter(x=sim['datetime'], y=sim['soc'], mode='lines', name='Rule-based', line=dict(color='blue')))
+    fig_combined_soc.add_trace(go.Scatter(x=milp_df['datetime'], y=milp_df['soc_pct'], mode='lines', name='MILP Optimal', line=dict(color='#00AA00', width=2.5)))
+    fig_combined_soc.update_yaxes(range=[0, 100], title="SOC (%)")
+    fig_combined_soc.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange", 
+                               annotation_text=f"Min {min_soc_pct}% Reserve")
+    fig_combined_soc.update_layout(title="Battery State of Charge (%) - Rule-based vs MILP")
+    st.plotly_chart(fig_combined_soc, use_container_width=True)
+
+    # Combined Cumulative Revenue plot
+    fig_combined_rev = go.Figure()
+    fig_combined_rev.add_trace(go.Scatter(x=sim['datetime'], y=sim['cum_rev'], mode='lines', name='Rule-based', line=dict(color='blue')))
+    milp_df['cum_revenue_milp'] = milp_df['net_revenue_eur'].cumsum()
+    fig_combined_rev.add_trace(go.Scatter(x=milp_df['datetime'], y=milp_df['cum_revenue_milp'], mode='lines', name='MILP Optimal', line=dict(color='#00AA00', width=2.5)))
+    fig_combined_rev.update_layout(title="Cumulative Net Revenue (€) - Rule-based vs MILP", yaxis_title="€")
+    st.plotly_chart(fig_combined_rev, use_container_width=True)
 
 st.markdown("---")
 
@@ -227,6 +255,10 @@ if st.session_state.get("run_milp", False):
                     income_discharge = discharge['net_revenue_eur'].sum()               # Green - we receive
 
                     st.success(f"MILP solved! Status: {milp_summary['status']}")
+
+                    # Store MILP results for overlay on main graphs
+                    st.session_state.milp_schedule = milp_schedule
+                    st.session_state.milp_summary = milp_summary
 
                     # Transparent colored metrics
                     st.markdown("#### 💰 MILP Financial Breakdown")
