@@ -11,6 +11,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 
+# MILP Optimizer
+from milp_optimizer import optimize_battery_schedule
+
 st.set_page_config(page_title="EMS Belgium MVP Dashboard", layout="wide")
 st.title("⚡ EMS Belgium - Battery & Grid Intelligence Dashboard")
 st.markdown("**MVP Prototype** | Belgian day-ahead prices | Smart arbitrage + free electricity charging | Grid balancing")
@@ -26,7 +29,7 @@ min_soc_pct = st.sidebar.slider("Minimum SOC reserve (%)", min_value=0, max_valu
                                 help="Batterij nooit verder ontladen dan dit percentage. Beschermt de batterij en laat altijd buffer over.")
 
 st.sidebar.markdown("---")
-st.sidebar.info("This is a rule-based MVP. Next version: full optimization (PuLP) + PV forecast + load profile + Yuso imbalance integration.")
+st.sidebar.info("Rule-based simulator + PuLP MILP optimization engine active. 10% SOC reserve is enforced in both.")
 
 # Load data (use pre-generated parquet, or upload XML/parquet directly in the app)
 @st.cache_data
@@ -184,6 +187,73 @@ fig_rev = px.area(sim, x='datetime', y='cum_rev', title="Cumulative Revenue (€
 st.plotly_chart(fig_rev, use_container_width=True)
 
 st.markdown("---")
-st.caption("MVP v0.1 | Data: ENTSO-E day-ahead Belgium | Next: Add PV production forecast, household load profile, full MILP optimization, Yuso imbalance prices & bidding, real-time control via MQTT/Home Assistant")
 
-st.info("**How to run full backtester + generate plots:** `python battery_arbitrage_backtester.py` (uses the XML directly)")
+# ==================== MILP OPTIMIZATION SECTION ====================
+with st.expander("🚀 Run MILP Optimization (true optimal schedule vs rule-based)", expanded=False):
+    st.markdown("""
+    **MILP** zoekt de écht optimale laad/ontlaad planning over de geselecteerde periode, 
+    rekening houdend met je **minimum SOC reserve**, efficiëntie en alle toekomstige prijzen.
+    Dit is wat een professioneel EMS platform doet na de day-ahead publicatie om 15:00.
+    """)
+
+    if st.button("Run MILP Optimization on current period", type="primary"):
+        with st.spinner("Solving MILP with PuLP (CBC solver)..."):
+            try:
+                milp_schedule, milp_summary = optimize_battery_schedule(
+                    sim_df,
+                    battery_kwh=battery_kwh,
+                    max_power_kw=max_power_kw,
+                    min_soc=min_soc_pct / 100,
+                    initial_soc=0.50
+                )
+
+                st.success(f"MILP solved successfully! Status: {milp_summary['status']}")
+
+                # Comparison metrics
+                col1, col2, col3 = st.columns(3)
+                col1.metric("MILP Net Revenue", f"{milp_summary['total_net_revenue_eur']:.2f} €", 
+                            delta=f"{milp_summary['total_net_revenue_eur'] - sim['cum_rev'].iloc[-1]:.2f} € vs Rule-based")
+                col2.metric("MILP Charged", f"{milp_summary['total_charged_kwh']:.1f} kWh")
+                col3.metric("MILP Final SOC", f"{milp_summary['final_soc_pct']:.1f} %")
+
+                # Optimal schedule plot
+                fig_milp = go.Figure()
+                fig_milp.add_trace(go.Scatter(x=milp_schedule['datetime'], y=milp_schedule['price_eur_mwh'], 
+                                              mode='lines', name='Price', line=dict(color='gray', width=1)))
+                
+                # Charge actions
+                charge_mask = milp_schedule['charge_kwh'] > 0.01
+                fig_milp.add_trace(go.Scatter(x=milp_schedule[charge_mask]['datetime'], 
+                                              y=milp_schedule[charge_mask]['price_eur_mwh'],
+                                              mode='markers', name='MILP CHARGE', 
+                                              marker=dict(color='green', size=10, symbol='triangle-up')))
+                
+                # Discharge actions
+                discharge_mask = milp_schedule['discharge_kwh'] > 0.01
+                fig_milp.add_trace(go.Scatter(x=milp_schedule[discharge_mask]['datetime'], 
+                                              y=milp_schedule[discharge_mask]['price_eur_mwh'],
+                                              mode='markers', name='MILP DISCHARGE', 
+                                              marker=dict(color='red', size=10, symbol='triangle-down')))
+                
+                fig_milp.update_layout(title="MILP Optimal Schedule (green = charge, red = discharge)",
+                                       xaxis_title="Time", yaxis_title="€/MWh")
+                st.plotly_chart(fig_milp, use_container_width=True)
+
+                # Comparison table
+                st.subheader("Comparison: Rule-based vs MILP")
+                comparison_df = pd.DataFrame({
+                    "Metric": ["Net Revenue (€)", "Energy Charged (kWh)", "Energy Discharged (kWh)", "Final SOC (%)"],
+                    "Rule-based": [round(sim['cum_rev'].iloc[-1], 2), 
+                                   round(sim['energy_kwh'].sum(), 1),
+                                   round(sim[sim['action'] == 'DISCHARGE']['energy_kwh'].sum(), 1),
+                                   round(sim['soc'].iloc[-1], 1)],
+                    "MILP Optimal": [milp_summary['total_net_revenue_eur'],
+                                     milp_summary['total_charged_kwh'],
+                                     milp_summary['total_discharged_kwh'],
+                                     milp_summary['final_soc_pct']]
+                })
+                st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+            except Exception as e:
+                st.error(f"MILP optimization failed: {str(e)}")
+                st.info("Tip: Try a shorter period (e.g. one day like 1 May 2026) for faster solving.")
