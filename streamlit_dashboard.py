@@ -217,19 +217,44 @@ if st.session_state.get("run_milp", False):
                         initial_soc=0.50
                     )
 
-                    # Calculate explicit charging cost and discharge income
-                    charging_cost = abs(milp_schedule[milp_schedule['charge_kwh'] > 0]['net_revenue_eur'].sum())
-                    discharge_income = milp_schedule[milp_schedule['discharge_kwh'] > 0]['net_revenue_eur'].sum()
+                    # Calculate transparent metrics with separation of positive vs negative prices
+                    pos_price_charge = milp_schedule[(milp_schedule['charge_kwh'] > 0) & (milp_schedule['price_eur_mwh'] > 0)]
+                    neg_price_charge = milp_schedule[(milp_schedule['charge_kwh'] > 0) & (milp_schedule['price_eur_mwh'] <= 0)]
+                    discharge = milp_schedule[milp_schedule['discharge_kwh'] > 0]
+
+                    cost_positive = abs(pos_price_charge['net_revenue_eur'].sum())      # Red - we pay
+                    income_negative = abs(neg_price_charge['net_revenue_eur'].sum())    # Green - we receive
+                    income_discharge = discharge['net_revenue_eur'].sum()               # Green - we receive
 
                     st.success(f"MILP solved! Status: {milp_summary['status']}")
 
-                    # Key metrics
+                    # Transparent colored metrics
+                    st.markdown("#### 💰 MILP Financial Breakdown")
                     col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("MILP Net Revenue", f"{milp_summary['total_net_revenue_eur']:.2f} €",
+                    col1.metric("Net Revenue", f"{milp_summary['total_net_revenue_eur']:.2f} €",
                                 delta=f"{milp_summary['total_net_revenue_eur'] - sim['cum_rev'].iloc[-1]:.2f} vs Rule-based")
-                    col2.metric("Charging Cost", f"-{charging_cost:.2f} €")
-                    col3.metric("Discharge Income", f"+{discharge_income:.2f} €")
-                    col4.metric("Max power per slot", f"{max_energy_per_slot:.3f} kWh")
+                    col2.metric("Cost (price > 0)", f"-{cost_positive:.2f} €", 
+                                help="What we pay when charging at positive prices", delta_color="inverse")
+                    col3.metric("Income (price ≤ 0)", f"+{income_negative:.2f} €",
+                                help="Money received for charging during negative / zero prices")
+                    col4.metric("Discharge Income", f"+{income_discharge:.2f} €",
+                                help="Money earned by discharging at high prices")
+
+                    # Detailed per 15-min table (with color coding)
+                    st.markdown("#### 📋 Detailed MILP Schedule per 15-min slot")
+                    detail_df = milp_schedule[['datetime', 'price_eur_mwh', 'charge_kwh', 'discharge_kwh', 'net_revenue_eur', 'soc_pct']].copy()
+                    detail_df['slot_revenue_color'] = detail_df['net_revenue_eur'].apply(
+                        lambda x: "🟢 Income" if x > 0 else ("🔴 Cost" if x < 0 else "⚪ Zero")
+                    )
+                    detail_df = detail_df.rename(columns={
+                        'datetime': 'Time',
+                        'price_eur_mwh': 'Price (€/MWh)',
+                        'charge_kwh': 'Charge (kWh)',
+                        'discharge_kwh': 'Discharge (kWh)',
+                        'net_revenue_eur': 'Slot Revenue (€)',
+                        'soc_pct': 'SOC (%)'
+                    })
+                    st.dataframe(detail_df, use_container_width=True, hide_index=True, height=300)
 
                     # Optimal schedule plot
                     fig_milp = go.Figure()
@@ -247,6 +272,20 @@ if st.session_state.get("run_milp", False):
                                                   marker=dict(color='red', size=9, symbol='triangle-down')))
                     fig_milp.update_layout(title="MILP Optimal Actions", xaxis_title="Time", yaxis_title="€/MWh")
                     st.plotly_chart(fig_milp, use_container_width=True)
+
+                    # MILP-specific SOC and Cumulative Revenue plots (as requested)
+                    st.markdown("#### 📈 MILP Battery State of Charge")
+                    fig_milp_soc = px.line(milp_schedule, x='datetime', y='soc_pct', 
+                                           title="MILP - State of Charge (%)", color_discrete_sequence=['#00AA00'])
+                    fig_milp_soc.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange", 
+                                           annotation_text=f"Min {min_soc_pct}% reserve")
+                    st.plotly_chart(fig_milp_soc, use_container_width=True)
+
+                    st.markdown("#### 📈 MILP Cumulative Revenue")
+                    milp_schedule['cum_revenue'] = milp_schedule['net_revenue_eur'].cumsum()
+                    fig_milp_rev = px.area(milp_schedule, x='datetime', y='cum_revenue',
+                                           title="MILP - Cumulative Net Revenue (€)", color_discrete_sequence=['#00AA00'])
+                    st.plotly_chart(fig_milp_rev, use_container_width=True)
 
                     # Comparison
                     st.subheader("Rule-based vs MILP")
