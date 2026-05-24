@@ -26,19 +26,42 @@ negative_boost = st.sidebar.checkbox("Aggressive charge on negative prices", val
 st.sidebar.markdown("---")
 st.sidebar.info("This is a rule-based MVP. Next version: full optimization (PuLP) + PV forecast + load profile + Yuso imbalance integration.")
 
-# Load data (use pre-generated or upload)
+# Load data (use pre-generated parquet, or upload XML/parquet directly in the app)
 @st.cache_data
 def load_data():
-    parquet = Path("prices_belgium.parquet")
-    if parquet.exists():
-        return pd.read_parquet(parquet)
+    parquet_path = Path("prices_belgium.parquet")
+    if parquet_path.exists():
+        return pd.read_parquet(parquet_path)
     else:
-        st.warning("Run price_parser.py first to generate prices_belgium.parquet")
         return pd.DataFrame()
 
 df = load_data()
 
+# If no parquet yet, allow upload of XML or parquet
 if df.empty:
+    st.warning("Geen prices_belgium.parquet gevonden. Upload de originele XML of de parquet hieronder, of run price_parser.py lokaal.")
+    
+    uploaded_file = st.file_uploader(
+        "Upload ENTSO-E XML of prices_belgium.parquet",
+        type=["xml", "parquet"],
+        help="De XML uit je attachments map, of de parquet die price_parser.py genereert."
+    )
+    
+    if uploaded_file is not None:
+        if uploaded_file.name.endswith(".parquet"):
+            df = pd.read_parquet(uploaded_file)
+            st.success("Parquet geladen via upload!")
+        elif uploaded_file.name.endswith(".xml"):
+            # Save temporarily and parse
+            temp_xml = Path("temp_upload.xml")
+            temp_xml.write_bytes(uploaded_file.getvalue())
+            from price_parser import parse_entsoe_prices
+            df = parse_entsoe_prices(temp_xml)
+            st.success("XML geüpload en geparsed! (parquet wordt niet automatisch opgeslagen)")
+        st.rerun()
+
+if df.empty:
+    st.info("Tip: Run lokaal `python price_parser.py` (pas het XML-pad aan in de parser als nodig) om prices_belgium.parquet te genereren, dan commit je dat kleine bestand.")
     st.stop()
 
 # Date range selector
