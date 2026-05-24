@@ -22,6 +22,8 @@ max_power_kw = st.sidebar.slider("Max Charge/Discharge Power (kW)", 2.0, 11.0, 5
 charge_thresh = st.sidebar.slider("Charge if price below (€/MWh)", 0, 80, 50)
 discharge_thresh = st.sidebar.slider("Discharge if price above (€/MWh)", 100, 250, 160)
 negative_boost = st.sidebar.checkbox("Aggressive charge on negative prices", value=True)
+min_soc_pct = st.sidebar.slider("Minimum SOC reserve (%)", min_value=0, max_value=30, value=10, step=1,
+                                help="Batterij nooit verder ontladen dan dit percentage. Beschermt de batterij en laat altijd buffer over.")
 
 st.sidebar.markdown("---")
 st.sidebar.info("This is a rule-based MVP. Next version: full optimization (PuLP) + PV forecast + load profile + Yuso imbalance integration.")
@@ -111,7 +113,7 @@ if neg_count > 0:
 st.subheader("Battery Simulation Results (Rule-based MVP)")
 
 # Re-simulate with current params (simplified version of backtester)
-def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh, neg_boost):
+def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh, neg_boost, min_soc=0.10):
     soc = 0.5
     cap_mwh = cap_kwh / 1000
     max_e_slot = (pwr_kw * 0.25) / 1000
@@ -123,23 +125,25 @@ def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh, neg_boost):
         e_mwh = 0.0
         rev = 0.0
         if p < 0 and neg_boost:
-            e = min(max_e_slot, (1-soc)*cap_mwh / 0.96)
+            e = min(max_e_slot, (1 - soc) * cap_mwh / 0.96)
             if e > 0.0001:
                 e_mwh = e
                 soc += e_mwh * 0.96 / cap_mwh
                 rev = -e_mwh * p
                 action = "CHARGE (NEG)"
         elif p < ch_thresh:
-            e = min(max_e_slot, (1-soc)*cap_mwh / 0.96)
+            e = min(max_e_slot, (1 - soc) * cap_mwh / 0.96)
             if e > 0.0001:
                 e_mwh = e
                 soc += e_mwh * 0.96 / cap_mwh
                 rev = -e_mwh * p
                 action = "CHARGE"
         elif p > dis_thresh:
-            e = min(max_e_slot, soc * cap_mwh * 0.96)
-            if e > 0.0001:
-                e_mwh = e
+            # KEY IMPROVEMENT: never discharge below min_soc (default 10% reserve)
+            available = max(0.0, (soc - min_soc) * cap_mwh * 0.96)
+            discharge_possible = min(max_e_slot, available)
+            if discharge_possible > 0.0001:
+                e_mwh = discharge_possible
                 soc -= e_mwh / (cap_mwh * 0.96)
                 rev = e_mwh * p
                 action = "DISCHARGE"
@@ -155,7 +159,7 @@ def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh, neg_boost):
         })
     return pd.DataFrame(results)
 
-sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh, discharge_thresh, negative_boost)
+sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh, discharge_thresh, negative_boost, min_soc_pct / 100)
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Net Revenue", f"{sim['cum_rev'].iloc[-1]:.2f} €")
