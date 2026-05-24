@@ -29,6 +29,11 @@ min_soc_pct = st.sidebar.slider("Minimum SOC reserve (%)", min_value=0, max_valu
                                 help="Batterij nooit verder ontladen dan dit percentage. Beschermt de batterij en laat altijd buffer over.")
 
 st.sidebar.markdown("---")
+
+# MILP button placed in sidebar with other controls
+if st.sidebar.button("🚀 Run MILP Optimization", type="primary"):
+    st.session_state.run_milp = True
+
 st.sidebar.info("Rule-based simulator + PuLP MILP optimization engine active. 10% SOC reserve is enforced in both.")
 
 # Load data (use pre-generated parquet, or upload XML/parquet directly in the app)
