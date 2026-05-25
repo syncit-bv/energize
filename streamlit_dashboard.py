@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+from datetime import date, timedelta, datetime
 
 # MILP Optimizer
 from milp_optimizer import optimize_battery_schedule
@@ -65,8 +66,8 @@ if ENTSOE_AVAILABLE:
         entsoe_key = st.text_input(
             "ENTSO-E API Key", 
             type="password",
-            value=st.session_state.get("entsoe_key", ""),
-            help="My Account → API Key"
+            value=st.session_state.get("entsoe_key") or st.secrets.get("entsoe_key", ""),
+            help="My Account → API Key (of zet in .streamlit/secrets.toml)"
         )
         if entsoe_key:
             st.session_state.entsoe_key = entsoe_key
@@ -101,8 +102,8 @@ if ELECTRICITY_MAPS_AVAILABLE:
         em_key = st.text_input(
             "Electricity Maps API Key",
             type="password",
-            value=st.session_state.get("em_key", ""),
-            help="Sandbox or Production key"
+            value=st.session_state.get("em_key") or st.secrets.get("em_key", ""),
+            help="Sandbox or Production key (of zet in .streamlit/secrets.toml)"
         )
         if em_key:
             st.session_state.em_key = em_key
