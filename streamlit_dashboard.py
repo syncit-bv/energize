@@ -2,7 +2,6 @@
 """
 EMS MVP Dashboard - Streamlit App
 Run with: streamlit run streamlit_dashboard.py
-Requires: pip install streamlit pandas matplotlib plotly
 """
 
 import streamlit as st
@@ -15,88 +14,108 @@ from datetime import date, timedelta, datetime
 # MILP Optimizer
 from milp_optimizer import optimize_battery_schedule
 
-# ENTSO-E Live Integration (optional but powerful for production EMS)
+# Optional integrations
 try:
     from entsoe_client import EntsoeClient
     ENTSOE_AVAILABLE = True
 except ImportError:
     ENTSOE_AVAILABLE = False
 
-# Electricity Maps Integration (carbon intensity + forecasts)
 try:
     from electricity_maps_client import ElectricityMapsClient
     ELECTRICITY_MAPS_AVAILABLE = True
 except ImportError:
     ELECTRICITY_MAPS_AVAILABLE = False
 
-# Fluvius Congestion Integration
 try:
     from congestion_client import CongestionClient
     CONGESTION_AVAILABLE = True
 except ImportError:
     CONGESTION_AVAILABLE = False
 
-# NODES Flex Market Integration
 try:
     from nodes_client import NodesClient
     NODES_AVAILABLE = True
 except ImportError:
     NODES_AVAILABLE = False
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="EMS Belgium MVP Dashboard", layout="wide")
 st.title("⚡ EMS Belgium - Battery & Grid Intelligence Dashboard")
-st.markdown("**MVP Prototype** | Belgian day-ahead prices | Smart arbitrage + free electricity charging | Grid balancing")
+st.markdown(
+    "**MVP Prototype** | Belgian day-ahead prices | "
+    "Smart arbitrage + free electricity charging | Grid balancing"
+)
 
-# Sidebar controls
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar – Battery & Strategy Parameters
+# ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("Battery & Strategy Parameters")
-battery_kwh = st.sidebar.slider("Usable Battery Capacity (kWh)", 5.0, 30.0, 10.0, 0.5)
-max_power_kw = st.sidebar.slider("Max Charge/Discharge Power (kW)", 2.0, 11.0, 5.0, 0.5)
-charge_thresh = st.sidebar.slider("Charge if price below (€/MWh)", 0, 80, 50)
+battery_kwh      = st.sidebar.slider("Usable Battery Capacity (kWh)", 5.0, 30.0, 10.0, 0.5)
+max_power_kw     = st.sidebar.slider("Max Charge/Discharge Power (kW)", 2.0, 11.0, 5.0, 0.5)
+charge_thresh    = st.sidebar.slider("Charge if price below (€/MWh)", 0, 80, 50)
 discharge_thresh = st.sidebar.slider("Discharge if price above (€/MWh)", 100, 250, 160)
-negative_boost = st.sidebar.checkbox("Aggressive charge on negative prices", value=True)
-min_soc_pct = st.sidebar.slider("Minimum SOC reserve (%)", min_value=0, max_value=30, value=10, step=1,
-                                help="Batterij nooit verder ontladen dan dit percentage. Beschermt de batterij en laat altijd buffer over.")
+negative_boost   = st.sidebar.checkbox("Aggressive charge on negative prices", value=True)
+min_soc_pct      = st.sidebar.slider(
+    "Minimum SOC reserve (%)", 0, 30, 10, 1,
+    help="Batterij nooit verder ontladen dan dit percentage.",
+)
+min_end_soc_pct  = st.sidebar.slider(
+    "Minimum End-of-Horizon SOC (%)", 10, 50, 20, 5,
+    help="Minimum SOC aan het einde van de optimalisatie horizon.",
+)
 
-min_end_soc_pct = st.sidebar.slider("Minimum End-of-Horizon SOC (%)", min_value=10, max_value=50, value=20, step=5,
-                                    help="Minimum SOC aan het einde van de optimalisatie horizon. Voorkomt dat je 's avonds op 10% eindigt en de volgende dag niet kunt laden.")
+max_energy_per_slot = max_power_kw * 0.25
+st.sidebar.metric(
+    "Max energy per 15-min slot", f"{max_energy_per_slot:.3f} kWh",
+    help="Bij 5 kW max power mag je per 15 min maximaal 1,25 kWh laden of ontladen.",
+)
+st.sidebar.info(
+    "Rule-based simulator + PuLP MILP optimization engine active. "
+    f"{min_soc_pct}% SOC reserve is enforced in both."
+)
 
 st.sidebar.markdown("---")
 
-# MILP button placed in sidebar with other controls
+# MILP trigger button
 if "run_milp" not in st.session_state:
     st.session_state.run_milp = False
 
 if st.sidebar.button("🚀 Run MILP Optimization", type="primary"):
-    st.session_state.run_milp = True
+    st.session_state.run_milp     = True
+    st.session_state.milp_schedule = None   # reset previous results
+    st.session_state.milp_summary  = None
 
-# ENTSO-E Live Data (alleen API key in sidebar)
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar – ENTSO-E Live Data
+# ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔌 ENTSO-E Live Data")
 
 if ENTSOE_AVAILABLE:
     with st.sidebar.expander("Live prijzen ophalen via ENTSO-E", expanded=False):
         st.caption("Vereist gratis API key van transparency.entsoe.eu")
-        
         entsoe_key = st.text_input(
-            "ENTSO-E API Key", 
+            "ENTSO-E API Key",
             type="password",
             value=st.session_state.get("entsoe_key") or st.secrets.get("entsoe_key", ""),
-            help="My Account → API Key (of zet in .streamlit/secrets.toml)"
+            help="My Account → API Key (of zet in .streamlit/secrets.toml)",
         )
         if entsoe_key:
             st.session_state.entsoe_key = entsoe_key
-        
+
         if st.button("📥 Haal laatste 7 dagen op", type="secondary"):
             if not entsoe_key:
                 st.error("Voer eerst je ENTSO-E API key in.")
             else:
                 try:
-                    with st.spinner("Ophalen van ENTSO-E..."):
-                        client = EntsoeClient(entsoe_key)
-                        end = date.today() + timedelta(days=1)
-                        start = end - timedelta(days=7)
-                        new_df = client.get_day_ahead_prices(start, end)
-                        
+                    with st.spinner("Ophalen van ENTSO-E…"):
+                        client  = EntsoeClient(entsoe_key)
+                        end     = date.today() + timedelta(days=1)
+                        start   = end - timedelta(days=7)
+                        new_df  = client.get_day_ahead_prices(start, end)
                         if not new_df.empty:
                             st.session_state.df_prices = new_df
                             st.success(f"✅ {len(new_df)} prijzen geladen!")
@@ -108,32 +127,31 @@ if ENTSOE_AVAILABLE:
 else:
     st.sidebar.caption("entsoe_client.py niet gevonden.")
 
-# Electricity Maps - Day-Ahead Prices (main focus right now)
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar – Electricity Maps
+# ─────────────────────────────────────────────────────────────────────────────
 if ELECTRICITY_MAPS_AVAILABLE:
     with st.sidebar.expander("🌍 Electricity Maps - Day-Ahead Prices", expanded=False):
         st.caption("Fetch fresh Day-Ahead prices (v4 API)")
-        
         em_key = st.text_input(
             "Electricity Maps API Key",
             type="password",
             value=st.session_state.get("em_key") or st.secrets.get("em_key", ""),
-            help="Sandbox or Production key (of zet in .streamlit/secrets.toml)"
+            help="Sandbox or Production key (of zet in .streamlit/secrets.toml)",
         )
         if em_key:
             st.session_state.em_key = em_key
-        
+
         if st.button("📥 Fetch Prices", type="secondary"):
             if not em_key:
                 st.error("Please enter your Electricity Maps API key.")
             else:
                 try:
-                    with st.spinner("Fetching from Electricity Maps..."):
+                    with st.spinner("Fetching from Electricity Maps…"):
                         em_client = ElectricityMapsClient(em_key)
-                        # Fetch last 7 days by default
-                        end = date.today() + timedelta(days=1)
-                        start = end - timedelta(days=7)
-                        new_df = em_client.get_day_ahead_prices("BE", start, end)
-                        
+                        end       = date.today() + timedelta(days=1)
+                        start     = end - timedelta(days=7)
+                        new_df    = em_client.get_day_ahead_prices("BE", start, end)
                         if not new_df.empty:
                             st.session_state.df_prices = new_df
                             st.success(f"✅ {len(new_df)} prijzen geladen!")
@@ -145,45 +163,34 @@ if ELECTRICITY_MAPS_AVAILABLE:
 else:
     st.sidebar.caption("electricity_maps_client.py niet gevonden.")
 
-# Extra metric the user requested
-max_energy_per_slot = max_power_kw * 0.25
-st.sidebar.metric("Max power per slot", f"{max_energy_per_slot:.3f} kWh", 
-                  help="Bij 2,5 kW max power mag je per 15 min maximaal 0,625 kWh laden of ontladen.")
-
-st.sidebar.info("Rule-based simulator + PuLP MILP optimization engine active. 10% SOC reserve is enforced in both.")
-
-# Load data (use pre-generated parquet, or upload XML/parquet directly in the app)
+# ─────────────────────────────────────────────────────────────────────────────
+# Data loading
+# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    parquet_path = Path("prices_belgium.parquet")
-    if parquet_path.exists():
-        return pd.read_parquet(parquet_path)
-    else:
-        return pd.DataFrame()
+    p = Path("prices_belgium.parquet")
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame()
 
-# Use session_state to persist dataframe across reruns / uploads
 if "df_prices" not in st.session_state:
     st.session_state.df_prices = load_data()
 
 df = st.session_state.df_prices
 
-# If no data yet, allow upload of XML or parquet
 if df.empty:
-    st.warning("Geen prijzen-data gevonden. Upload ENTSO-E XML, gebruik de live ENTSO-E fetch hierboven, of laad een prices_belgium.parquet.")
-    
+    st.warning(
+        "Geen prijzen-data gevonden. Upload ENTSO-E XML, gebruik de live ENTSO-E fetch, "
+        "of laad een prices_belgium.parquet."
+    )
     uploaded_file = st.file_uploader(
         "Upload ENTSO-E XML of prices_belgium.parquet",
         type=["xml", "parquet"],
-        help="De XML uit je attachments map, of de parquet die price_parser.py genereert. Of gebruik de ENTSO-E Live fetch in de sidebar!"
     )
-    
     if uploaded_file is not None:
         if uploaded_file.name.endswith(".parquet"):
             df = pd.read_parquet(uploaded_file)
             st.session_state.df_prices = df
             st.success("Parquet succesvol geladen!")
             st.rerun()
-            
         elif uploaded_file.name.endswith(".xml"):
             temp_xml = Path("temp_upload.xml")
             temp_xml.write_bytes(uploaded_file.getvalue())
@@ -191,346 +198,515 @@ if df.empty:
             df = parse_entsoe_prices(temp_xml)
             st.session_state.df_prices = df
             st.success("XML geüpload en succesvol geparsed!")
-            
-            # Offer download of parquet for GitHub / future use
             parquet_bytes = df.to_parquet(index=False)
             st.download_button(
-                label="📥 Download als prices_belgium.parquet (voor toekomstig gebruik / GitHub)",
+                "📥 Download als prices_belgium.parquet",
                 data=parquet_bytes,
                 file_name="prices_belgium.parquet",
-                mime="application/octet-stream"
+                mime="application/octet-stream",
             )
             st.rerun()
 
-# Safety check
 if st.session_state.df_prices.empty:
-    st.info("Tip: Run lokaal `python price_parser.py` (pas eventueel het pad naar de XML aan) om de parquet te genereren en commit die.")
+    st.info("Tip: Run lokaal `python price_parser.py` om de parquet te genereren.")
     st.stop()
 
-df = st.session_state.df_prices  # ensure we use the session state version
+df       = st.session_state.df_prices
+min_date = df["datetime"].min().date()
+max_date = df["datetime"].max().date()
 
-min_date = df['datetime'].min().date()
-max_date = df['datetime'].max().date()
+# ─────────────────────────────────────────────────────────────────────────────
+# Date range – session-state driven (single source of truth)
+# ─────────────────────────────────────────────────────────────────────────────
+_week_start  = max(min_date, max_date - timedelta(days=6))
+_month_start = max(min_date, max_date.replace(day=1))
 
-# === Quick View Buttons + Date Range ===
+# Initialise session state on very first run → default = current week
+if "date_start" not in st.session_state:
+    st.session_state.date_start = _week_start
+    st.session_state.date_end   = max_date
+    # Pre-populate the date_input widget key so it shows the right value
+    st.session_state["date_range_picker"] = (_week_start, max_date)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quick-view buttons
+# ─────────────────────────────────────────────────────────────────────────────
 st.subheader("📅 Analyse Periode")
 
-# Initialize session state for dates if not present
-if "date_start" not in st.session_state or "date_end" not in st.session_state:
-    # Default = laatste 7 dagen (huidige week)
-    st.session_state.date_end = max_date
-    st.session_state.date_start = max(min_date, max_date - pd.Timedelta(days=6))
+is_today = (st.session_state.date_start == max_date and
+            st.session_state.date_end   == max_date)
+is_week  = (st.session_state.date_start == _week_start and
+            st.session_state.date_end   == max_date)
+is_month = (st.session_state.date_start == _month_start and
+            st.session_state.date_end   == max_date)
 
-# Quick view buttons (with active highlighting)
-col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
-
-is_today = (st.session_state.date_start == st.session_state.date_end == max_date)
-is_week = (st.session_state.date_end == max_date) and (st.session_state.date_start == max(min_date, max_date - pd.Timedelta(days=6)))
-is_month = (st.session_state.date_end == max_date) and (st.session_state.date_start == max(min_date, max_date.replace(day=1)))
+col1, col2, col3, _ = st.columns([1, 1, 1, 2])
 
 with col1:
-    if st.button("📅 Vandaag", type="primary" if is_today else "secondary", use_container_width=True):
-        st.session_state.date_start = max_date
-        st.session_state.date_end = max_date
-        st.rerun()
-with col2:
-    if st.button("📆 Deze Week", type="primary" if is_week else "secondary", use_container_width=True):
-        st.session_state.date_end = max_date
-        st.session_state.date_start = max(min_date, max_date - pd.Timedelta(days=6))
-        st.rerun()
-with col3:
-    if st.button("🗓️ Deze Maand", type="primary" if is_month else "secondary", use_container_width=True):
-        st.session_state.date_end = max_date
-        first_of_month = max_date.replace(day=1)
-        st.session_state.date_start = max(min_date, first_of_month)
+    if st.button(
+        "📅 Vandaag",
+        type="primary" if is_today else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.date_start              = max_date
+        st.session_state.date_end                = max_date
+        st.session_state["date_range_picker"]    = (max_date, max_date)
+        st.session_state.milp_schedule           = None   # clear stale MILP
+        st.session_state.milp_summary            = None
         st.rerun()
 
-# Date range picker (controlled by session state)
+with col2:
+    if st.button(
+        "📆 Deze Week",
+        type="primary" if is_week else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.date_start           = _week_start
+        st.session_state.date_end             = max_date
+        st.session_state["date_range_picker"] = (_week_start, max_date)
+        st.session_state.milp_schedule        = None
+        st.session_state.milp_summary         = None
+        st.rerun()
+
+with col3:
+    if st.button(
+        "🗓️ Deze Maand",
+        type="primary" if is_month else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.date_start           = _month_start
+        st.session_state.date_end             = max_date
+        st.session_state["date_range_picker"] = (_month_start, max_date)
+        st.session_state.milp_schedule        = None
+        st.session_state.milp_summary         = None
+        st.rerun()
+
+# Date-picker widget – the key drives its value from session state
 date_range = st.date_input(
     "Of kies een eigen periode:",
-    value=(st.session_state.date_start, st.session_state.date_end),
     min_value=min_date,
     max_value=max_date,
-    key="date_range_picker"
+    key="date_range_picker",   # widget reads/writes st.session_state["date_range_picker"]
 )
 
-# Update session state if user manually changes the date_input
-if date_range[0] != st.session_state.date_start or date_range[1] != st.session_state.date_end:
-    st.session_state.date_start = date_range[0]
-    st.session_state.date_end = date_range[1]
+# Keep date_start / date_end in sync with the picker (handles manual user edits)
+if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+    if (date_range[0] != st.session_state.date_start or
+            date_range[1] != st.session_state.date_end):
+        st.session_state.date_start    = date_range[0]
+        st.session_state.date_end      = date_range[1]
+        st.session_state.milp_schedule = None   # stale MILP when period changes
+        st.session_state.milp_summary  = None
 
-# Filter data
-mask = (df['datetime'].dt.date >= st.session_state.date_start) & (df['datetime'].dt.date <= st.session_state.date_end)
+# ─────────────────────────────────────────────────────────────────────────────
+# Filter data for selected period
+# ─────────────────────────────────────────────────────────────────────────────
+mask   = (
+    (df["datetime"].dt.date >= st.session_state.date_start) &
+    (df["datetime"].dt.date <= st.session_state.date_end)
+)
 sim_df = df[mask].copy()
 
-st.subheader(f"Price Overview ({date_range[0]} → {date_range[1]})")
-fig_price = px.line(sim_df, x='datetime', y='price_eur_mwh', 
-                    title="Day-ahead Electricity Prices Belgium (€/MWh)",
-                    labels={'price_eur_mwh': 'Price (€/MWh)', 'datetime': 'Time'})
-fig_price.add_hline(y=charge_thresh, line_dash="dash", line_color="green", annotation_text="Charge threshold")
-fig_price.add_hline(y=discharge_thresh, line_dash="dash", line_color="red", annotation_text="Discharge threshold")
+st.subheader(
+    f"Price Overview  {st.session_state.date_start} → {st.session_state.date_end}  "
+    f"({len(sim_df)} kwartier-slots)"
+)
+
+fig_price = px.line(
+    sim_df, x="datetime", y="price_eur_mwh",
+    title="Day-ahead Electricity Prices Belgium (€/MWh)",
+    labels={"price_eur_mwh": "Price (€/MWh)", "datetime": "Time"},
+)
+fig_price.add_hline(y=charge_thresh,    line_dash="dash", line_color="green",
+                    annotation_text="Charge threshold")
+fig_price.add_hline(y=discharge_thresh, line_dash="dash", line_color="red",
+                    annotation_text="Discharge threshold")
 st.plotly_chart(fig_price, use_container_width=True)
 
-# Negative price highlight
-neg_count = (sim_df['price_eur_mwh'] < 0).sum()
+neg_count = (sim_df["price_eur_mwh"] < 0).sum()
 if neg_count > 0:
-    st.success(f"🎉 {neg_count} quarters with **negative prices** in this period → perfect moments for 'free or paid charging' + grid support!")
+    st.success(
+        f"🎉 {neg_count} kwartieren met **negatieve prijzen** in deze periode "
+        "→ ideaal moment voor 'gratis of betaald' laden + grid support!"
+    )
 
-# ==================== LIVE FLUVIUS + NODES FLEX MARKET ====================
-with st.expander("🌐 Live Fluvius Netcongestie & NODES Flex Market", expanded=True):
+# ─────────────────────────────────────────────────────────────────────────────
+# Live Fluvius + NODES
+# ─────────────────────────────────────────────────────────────────────────────
+with st.expander("🌐 Live Fluvius Netcongestie & NODES Flex Market", expanded=False):
     st.markdown("**Real-time grid intelligence** | Fluvius Capaciteitswijzer + NODES Flexibiliteitsmarkt")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.subheader("📍 Fluvius Congestie")
         if CONGESTION_AVAILABLE:
             congestion_client = CongestionClient()
             gemeente = st.text_input("Gemeente / Zone", value="Gent", key="fluvius_gemeente")
-            
             if st.button("Haal Fluvius data op", key="btn_fluvius"):
-                with st.spinner("Fluvius data ophalen..."):
-                    summary = congestion_client.get_congestion_summary(gemeente)
-                    st.json(summary)
-                    
+                with st.spinner("Fluvius data ophalen…"):
+                    st.json(congestion_client.get_congestion_summary(gemeente))
                     df_cong = congestion_client.get_expected_congestion_hours(gemeente)
                     if not df_cong.empty:
                         st.dataframe(df_cong, use_container_width=True)
         else:
-            st.warning("congestion_client.py niet gevonden. Run de integratie eerst.")
-    
-    with col2:
+            st.warning("congestion_client.py niet gevonden.")
+    with c2:
         st.subheader("🔌 NODES Flex Market")
         if NODES_AVAILABLE:
             nodes_client = NodesClient()
-            
             if st.button("Haal NODES marktstatus op", key="btn_nodes"):
-                with st.spinner("NODES data ophalen..."):
-                    nodes_summary = nodes_client.get_market_summary()
-                    st.json(nodes_summary)
-                    
+                with st.spinner("NODES data ophalen…"):
+                    st.json(nodes_client.get_market_summary())
                     df_flex = nodes_client.get_available_flex_requests()
                     if not df_flex.empty:
                         st.dataframe(df_flex, use_container_width=True)
                     else:
-                        st.info("Geen open flex requests op dit moment (of API key nodig).")
+                        st.info("Geen open flex requests (of API key nodig).")
         else:
-            st.warning("nodes_client.py niet gevonden. Run de integratie eerst.")
+            st.warning("nodes_client.py niet gevonden.")
 
-# Simple simulation (re-run with sidebar params for interactivity)
-st.subheader("Battery Simulation Results (Rule-based MVP)")
-
-# Re-simulate with current params (simplified version of backtester)
+# ─────────────────────────────────────────────────────────────────────────────
+# Rule-based simulation
+# ─────────────────────────────────────────────────────────────────────────────
 def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh, neg_boost, min_soc=0.10):
-    soc = 0.5
-    cap_mwh = cap_kwh / 1000
-    max_e_slot = (pwr_kw * 0.25) / 1000
-    results = []
-    cum_rev = 0.0
+    soc       = 0.5
+    cap_mwh   = cap_kwh / 1000
+    max_e     = (pwr_kw * 0.25) / 1000
+    results   = []
+    cum_rev   = 0.0
     for _, row in data.iterrows():
-        p = row['price_eur_mwh']
+        p      = row["price_eur_mwh"]
         action = "HOLD"
-        e_mwh = 0.0
-        rev = 0.0
+        e_mwh  = 0.0
+        rev    = 0.0
         if p < 0 and neg_boost:
-            e = min(max_e_slot, (1 - soc) * cap_mwh / 0.96)
+            e = min(max_e, (1 - soc) * cap_mwh / 0.96)
             if e > 0.0001:
-                e_mwh = e
-                soc += e_mwh * 0.96 / cap_mwh
-                rev = -e_mwh * p
-                action = "CHARGE (NEG)"
+                e_mwh   = e
+                soc    += e_mwh * 0.96 / cap_mwh
+                rev     = -e_mwh * p
+                action  = "CHARGE (NEG)"
         elif p < ch_thresh:
-            e = min(max_e_slot, (1 - soc) * cap_mwh / 0.96)
+            e = min(max_e, (1 - soc) * cap_mwh / 0.96)
             if e > 0.0001:
-                e_mwh = e
-                soc += e_mwh * 0.96 / cap_mwh
-                rev = -e_mwh * p
-                action = "CHARGE"
+                e_mwh   = e
+                soc    += e_mwh * 0.96 / cap_mwh
+                rev     = -e_mwh * p
+                action  = "CHARGE"
         elif p > dis_thresh:
-            # KEY IMPROVEMENT: never discharge below min_soc (default 10% reserve)
             available = max(0.0, (soc - min_soc) * cap_mwh * 0.96)
-            discharge_possible = min(max_e_slot, available)
+            discharge_possible = min(max_e, available)
             if discharge_possible > 0.0001:
-                e_mwh = discharge_possible
-                soc -= e_mwh / (cap_mwh * 0.96)
-                rev = e_mwh * p
-                action = "DISCHARGE"
+                e_mwh   = discharge_possible
+                soc    -= e_mwh / (cap_mwh * 0.96)
+                rev     = e_mwh * p
+                action  = "DISCHARGE"
         cum_rev += rev
         results.append({
-            'datetime': row['datetime'],
-            'price': p,
-            'action': action,
-            'energy_kwh': e_mwh * 1000,
-            'revenue': rev,
-            'soc': soc * 100,
-            'cum_rev': cum_rev
+            "datetime":   row["datetime"],
+            "price":      p,
+            "action":     action,
+            "energy_kwh": e_mwh * 1000,
+            "revenue":    rev,
+            "soc":        soc * 100,
+            "cum_rev":    cum_rev,
         })
     return pd.DataFrame(results)
 
-sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh, discharge_thresh, negative_boost, min_soc_pct / 100)
+sim = quick_simulate(
+    sim_df, battery_kwh, max_power_kw,
+    charge_thresh, discharge_thresh,
+    negative_boost, min_soc_pct / 100,
+)
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Net Revenue", f"{sim['cum_rev'].iloc[-1]:.2f} €")
-col2.metric("Energy Charged", f"{sim['energy_kwh'].sum():.1f} kWh")
-col3.metric("Avg SOC", f"{sim['soc'].mean():.1f} %")
+# ─────────────────────────────────────────────────────────────────────────────
+# KPI metrics
+# ─────────────────────────────────────────────────────────────────────────────
+st.subheader("🔋 Battery Simulation Results")
 
-# Actions plot
+milp_ready = st.session_state.get("milp_schedule") is not None
+
+m1, m2, m3 = st.columns(3)
+m1.metric(
+    "Net Revenue (Rule-based)",
+    f"{sim['cum_rev'].iloc[-1]:.2f} €",
+    delta=(
+        f"MILP: {st.session_state.milp_summary['total_net_revenue_eur']:.2f} €"
+        if milp_ready else None
+    ),
+)
+m2.metric("Energy Charged", f"{sim['energy_kwh'].sum():.1f} kWh")
+m3.metric("Avg SOC", f"{sim['soc'].mean():.1f} %")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Actions chart
+# ─────────────────────────────────────────────────────────────────────────────
 fig_actions = go.Figure()
-fig_actions.add_trace(go.Scatter(x=sim['datetime'], y=sim['price'], mode='lines', name='Price', line=dict(color='gray')))
-charge_pts = sim[sim['action'].str.contains('CHARGE')]
-dis_pts = sim[sim['action'] == 'DISCHARGE']
-fig_actions.add_trace(go.Scatter(x=charge_pts['datetime'], y=charge_pts['price'], mode='markers', name='CHARGE', marker=dict(color='green', size=8)))
-fig_actions.add_trace(go.Scatter(x=dis_pts['datetime'], y=dis_pts['price'], mode='markers', name='DISCHARGE', marker=dict(color='red', size=8)))
-fig_actions.update_layout(title="Price + EMS Actions", xaxis_title="Time", yaxis_title="€/MWh")
+fig_actions.add_trace(go.Scatter(
+    x=sim["datetime"], y=sim["price"], mode="lines",
+    name="Price", line=dict(color="gray"),
+))
+charge_pts = sim[sim["action"].str.contains("CHARGE")]
+dis_pts    = sim[sim["action"] == "DISCHARGE"]
+fig_actions.add_trace(go.Scatter(
+    x=charge_pts["datetime"], y=charge_pts["price"], mode="markers",
+    name="CHARGE", marker=dict(color="green", size=8),
+))
+fig_actions.add_trace(go.Scatter(
+    x=dis_pts["datetime"], y=dis_pts["price"], mode="markers",
+    name="DISCHARGE", marker=dict(color="red", size=8),
+))
+fig_actions.update_layout(title="Price + Rule-based EMS Actions",
+                          xaxis_title="Time", yaxis_title="€/MWh")
 st.plotly_chart(fig_actions, use_container_width=True)
 
-# SOC and revenue (improved with fixed 0-100% scale + min reserve line)
-fig_soc = px.line(sim, x='datetime', y='soc', title="Battery State of Charge (%) - Rule-based", color_discrete_sequence=['blue'])
-fig_soc.update_yaxes(range=[0, 100])
-fig_soc.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange", 
-                  annotation_text=f"Min {min_soc_pct}% SOC Reserve", annotation_position="top right")
+# ─────────────────────────────────────────────────────────────────────────────
+# SOC chart  –  shows MILP overlay automatically when available
+# ─────────────────────────────────────────────────────────────────────────────
+fig_soc = go.Figure()
+fig_soc.add_trace(go.Scatter(
+    x=sim["datetime"], y=sim["soc"],
+    mode="lines", name="Rule-based SOC",
+    line=dict(color="royalblue", width=2),
+))
+if milp_ready:
+    milp_df = st.session_state.milp_schedule
+    fig_soc.add_trace(go.Scatter(
+        x=milp_df["datetime"], y=milp_df["soc_pct"],
+        mode="lines", name="MILP Optimal SOC",
+        line=dict(color="#00AA00", width=2.5, dash="dot"),
+    ))
+fig_soc.add_hline(
+    y=min_soc_pct, line_dash="dash", line_color="orange",
+    annotation_text=f"Min {min_soc_pct}% SOC Reserve",
+    annotation_position="top right",
+)
+fig_soc.update_yaxes(range=[0, 100], title="SOC (%)")
+title_soc = "Battery State of Charge (%)"
+if milp_ready:
+    title_soc += " — Rule-based vs MILP"
+fig_soc.update_layout(title=title_soc, xaxis_title="Time")
 st.plotly_chart(fig_soc, use_container_width=True)
 
-fig_rev = px.area(sim, x='datetime', y='cum_rev', title="Cumulative Revenue (€) from Smart Charging/Discharging")
+# ─────────────────────────────────────────────────────────────────────────────
+# Revenue chart  –  shows MILP overlay automatically when available
+# ─────────────────────────────────────────────────────────────────────────────
+fig_rev = go.Figure()
+fig_rev.add_trace(go.Scatter(
+    x=sim["datetime"], y=sim["cum_rev"],
+    mode="lines", name="Rule-based",
+    fill="tozeroy", line=dict(color="royalblue"),
+))
+if milp_ready:
+    milp_df = st.session_state.milp_schedule
+    milp_df = milp_df.copy()
+    milp_df["cum_revenue_milp"] = milp_df["net_revenue_eur"].cumsum()
+    fig_rev.add_trace(go.Scatter(
+        x=milp_df["datetime"], y=milp_df["cum_revenue_milp"],
+        mode="lines", name="MILP Optimal",
+        line=dict(color="#00AA00", width=2.5, dash="dot"),
+    ))
+title_rev = "Cumulative Revenue (€) from Smart Charging/Discharging"
+if milp_ready:
+    title_rev += " — Rule-based vs MILP"
+fig_rev.update_layout(title=title_rev, xaxis_title="Time", yaxis_title="€")
 st.plotly_chart(fig_rev, use_container_width=True)
 
-# ==================== COMBINED OVERLAY PLOTS (when MILP has been run) ====================
-if st.session_state.get("milp_schedule") is not None:
-    st.markdown("---")
-    st.subheader("📊 Combined View: Rule-based vs MILP (Overlay)")
-
-    milp_df = st.session_state.milp_schedule
-
-    # Combined SOC plot
-    fig_combined_soc = go.Figure()
-    fig_combined_soc.add_trace(go.Scatter(x=sim['datetime'], y=sim['soc'], mode='lines', name='Rule-based', line=dict(color='blue')))
-    fig_combined_soc.add_trace(go.Scatter(x=milp_df['datetime'], y=milp_df['soc_pct'], mode='lines', name='MILP Optimal', line=dict(color='#00AA00', width=2.5)))
-    fig_combined_soc.update_yaxes(range=[0, 100], title="SOC (%)")
-    fig_combined_soc.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange", 
-                               annotation_text=f"Min {min_soc_pct}% Reserve")
-    fig_combined_soc.update_layout(title="Battery State of Charge (%) - Rule-based vs MILP")
-    st.plotly_chart(fig_combined_soc, use_container_width=True)
-
-    # Combined Cumulative Revenue plot
-    fig_combined_rev = go.Figure()
-    fig_combined_rev.add_trace(go.Scatter(x=sim['datetime'], y=sim['cum_rev'], mode='lines', name='Rule-based', line=dict(color='blue')))
-    milp_df['cum_revenue_milp'] = milp_df['net_revenue_eur'].cumsum()
-    fig_combined_rev.add_trace(go.Scatter(x=milp_df['datetime'], y=milp_df['cum_revenue_milp'], mode='lines', name='MILP Optimal', line=dict(color='#00AA00', width=2.5)))
-    fig_combined_rev.update_layout(title="Cumulative Net Revenue (€) - Rule-based vs MILP", yaxis_title="€")
-    st.plotly_chart(fig_combined_rev, use_container_width=True)
-
+# ─────────────────────────────────────────────────────────────────────────────
+# MILP Optimization
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 
-# ==================== MILP RESULTS (in expander, triggered from sidebar) ====================
 if st.session_state.get("run_milp", False):
     with st.expander("🚀 MILP Optimization Results", expanded=True):
-        st.markdown("**MILP** zoekt de optimale planning met perfecte foresight over de geselecteerde periode, met harde 10% SOC reserve.")
+        st.markdown(
+            "**MILP** zoekt de optimale planning met perfecte foresight over de geselecteerde "
+            "periode. Harde SOC-reserve en end-SOC constraint zijn altijd actief."
+        )
 
-        if st.button("Run MILP now (on current period)", key="run_milp_btn"):
-            with st.spinner("Solving MILP..."):
-                try:
-                    milp_schedule, milp_summary = optimize_battery_schedule(
-                        sim_df,
-                        battery_kwh=battery_kwh,
-                        max_power_kw=max_power_kw,
-                        min_soc=min_soc_pct / 100,
-                        min_end_soc=min_end_soc_pct / 100,
-                        initial_soc=0.50
-                    )
+        # ── Run button ────────────────────────────────────────────────────────
+        n_slots = len(sim_df)
+        n_days  = round(n_slots / 96, 1)
+        if st.button(
+            f"▶️  Optimaliseer {n_slots} slots ({n_days} dagen) via MILP",
+            key="run_milp_btn",
+            type="primary",
+        ):
+            progress_bar = st.progress(0, text="MILP solver initialiseren…")
+            status_box   = st.empty()
 
-                    # Calculate transparent metrics with separation of positive vs negative prices
-                    pos_price_charge = milp_schedule[(milp_schedule['charge_kwh'] > 0) & (milp_schedule['price_eur_mwh'] > 0)]
-                    neg_price_charge = milp_schedule[(milp_schedule['charge_kwh'] > 0) & (milp_schedule['price_eur_mwh'] <= 0)]
-                    discharge = milp_schedule[milp_schedule['discharge_kwh'] > 0]
+            try:
+                status_box.info(
+                    f"⚙️  Solving {n_slots} time slots over {n_days} days…  "
+                    "Dit kan enkele seconden duren."
+                )
+                progress_bar.progress(10, text="Variabelen en constraints aanmaken…")
 
-                    cost_positive = abs(pos_price_charge['net_revenue_eur'].sum())      # Red - we pay
-                    income_negative = abs(neg_price_charge['net_revenue_eur'].sum())    # Green - we receive
-                    income_discharge = discharge['net_revenue_eur'].sum()               # Green - we receive
+                milp_schedule, milp_summary = optimize_battery_schedule(
+                    sim_df,
+                    battery_kwh=battery_kwh,
+                    max_power_kw=max_power_kw,
+                    min_soc=min_soc_pct / 100,
+                    min_end_soc=min_end_soc_pct / 100,
+                    initial_soc=0.50,
+                    time_horizon_hours=None,   # ← use ALL selected slots
+                )
 
-                    st.success(f"MILP solved! Status: {milp_summary['status']}")
+                progress_bar.progress(90, text="Resultaten verwerken…")
 
-                    # Store MILP results for overlay on main graphs
-                    st.session_state.milp_schedule = milp_schedule
-                    st.session_state.milp_summary = milp_summary
+                # Store for overlay charts above
+                st.session_state.milp_schedule = milp_schedule
+                st.session_state.milp_summary  = milp_summary
 
-                    # Transparent colored metrics
-                    st.markdown("#### 💰 MILP Financial Breakdown")
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Net Revenue", f"{milp_summary['total_net_revenue_eur']:.2f} €",
-                                delta=f"{milp_summary['total_net_revenue_eur'] - sim['cum_rev'].iloc[-1]:.2f} vs Rule-based")
-                    col2.metric("Cost (price > 0)", f"-{cost_positive:.2f} €", 
-                                help="What we pay when charging at positive prices", delta_color="inverse")
-                    col3.metric("Income (price ≤ 0)", f"+{income_negative:.2f} €",
-                                help="Money received for charging during negative / zero prices")
-                    col4.metric("Discharge Income", f"+{income_discharge:.2f} €",
-                                help="Money earned by discharging at high prices")
+                progress_bar.progress(100, text="✅  Klaar!")
+                status_box.empty()
 
-                    # Detailed table - only slots with actual Charge or Discharge action
-                    st.markdown("#### 📋 MILP Actions (only quarters with activity)")
-                    action_mask = (milp_schedule['charge_kwh'] > 0.01) | (milp_schedule['discharge_kwh'] > 0.01)
-                    detail_df = milp_schedule[action_mask][['datetime', 'price_eur_mwh', 'charge_kwh', 'discharge_kwh', 'net_revenue_eur', 'soc_pct']].copy()
-                    detail_df['Revenue Type'] = detail_df['net_revenue_eur'].apply(
-                        lambda x: "🟢 Income" if x > 0 else ("🔴 Cost" if x < 0 else "⚪ Zero")
-                    )
-                    detail_df = detail_df.rename(columns={
-                        'datetime': 'Time',
-                        'price_eur_mwh': 'Price (€/MWh)',
-                        'charge_kwh': 'Charge (kWh)',
-                        'discharge_kwh': 'Discharge (kWh)',
-                        'net_revenue_eur': 'Slot Revenue (€)',
-                        'soc_pct': 'SOC (%)'
-                    })
-                    st.dataframe(detail_df, use_container_width=True, hide_index=True, height=400)
+                # ── Solver stats banner ───────────────────────────────────────
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric(
+                    "Solver status",
+                    milp_summary["status"],
+                    help="Optimal = globaal optimum gevonden",
+                )
+                s2.metric(
+                    "Solve time",
+                    f"{milp_summary['solve_time_sec']} s",
+                    help="Wallclock tijd voor CBC solver",
+                )
+                s3.metric(
+                    "Simplex iteraties",
+                    f"{milp_summary['solver_iterations']:,}",
+                    help="Aantal LP simplex iteraties door CBC",
+                )
+                s4.metric(
+                    "Slots geoptimaliseerd",
+                    f"{milp_summary['num_slots']}",
+                    help=f"{n_days} dagen × 96 kwartieren",
+                )
 
-                    # Optimal schedule plot
-                    fig_milp = go.Figure()
-                    fig_milp.add_trace(go.Scatter(x=milp_schedule['datetime'], y=milp_schedule['price_eur_mwh'],
-                                                  mode='lines', name='Price', line=dict(color='gray')))
-                    charge_mask = milp_schedule['charge_kwh'] > 0.01
-                    fig_milp.add_trace(go.Scatter(x=milp_schedule[charge_mask]['datetime'],
-                                                  y=milp_schedule[charge_mask]['price_eur_mwh'],
-                                                  mode='markers', name='MILP CHARGE',
-                                                  marker=dict(color='green', size=9, symbol='triangle-up')))
-                    discharge_mask = milp_schedule['discharge_kwh'] > 0.01
-                    fig_milp.add_trace(go.Scatter(x=milp_schedule[discharge_mask]['datetime'],
-                                                  y=milp_schedule[discharge_mask]['price_eur_mwh'],
-                                                  mode='markers', name='MILP DISCHARGE',
-                                                  marker=dict(color='red', size=9, symbol='triangle-down')))
-                    fig_milp.update_layout(title="MILP Optimal Actions", xaxis_title="Time", yaxis_title="€/MWh")
-                    st.plotly_chart(fig_milp, use_container_width=True)
+                # ── Financial breakdown ───────────────────────────────────────
+                st.markdown("#### 💰 MILP Financieel Overzicht")
 
-                    # MILP-specific SOC and Cumulative Revenue plots (as requested)
-                    st.markdown("#### 📈 MILP Battery State of Charge")
-                    fig_milp_soc = px.line(milp_schedule, x='datetime', y='soc_pct', 
-                                           title="MILP - State of Charge (%)", color_discrete_sequence=['#00AA00'])
-                    fig_milp_soc.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange", 
-                                           annotation_text=f"Min {min_soc_pct}% reserve")
-                    st.plotly_chart(fig_milp_soc, use_container_width=True)
+                pos_charge   = milp_schedule[
+                    (milp_schedule["charge_kwh"] > 0) & (milp_schedule["price_eur_mwh"] > 0)
+                ]
+                neg_charge   = milp_schedule[
+                    (milp_schedule["charge_kwh"] > 0) & (milp_schedule["price_eur_mwh"] <= 0)
+                ]
+                discharge_df = milp_schedule[milp_schedule["discharge_kwh"] > 0]
 
-                    st.markdown("#### 📈 MILP Cumulative Revenue")
-                    milp_schedule['cum_revenue'] = milp_schedule['net_revenue_eur'].cumsum()
-                    fig_milp_rev = px.area(milp_schedule, x='datetime', y='cum_revenue',
-                                           title="MILP - Cumulative Net Revenue (€)", color_discrete_sequence=['#00AA00'])
-                    st.plotly_chart(fig_milp_rev, use_container_width=True)
+                cost_pos       = abs(pos_charge["net_revenue_eur"].sum())
+                income_neg     = abs(neg_charge["net_revenue_eur"].sum())
+                income_dis     = discharge_df["net_revenue_eur"].sum()
+                rule_based_rev = sim["cum_rev"].iloc[-1]
 
-                    # Comparison
-                    st.subheader("Rule-based vs MILP")
-                    comp = pd.DataFrame({
-                        "Metric": ["Net Revenue (€)", "Charged (kWh)", "Discharged (kWh)", "Final SOC (%)"],
-                        "Rule-based": [round(sim['cum_rev'].iloc[-1], 2),
-                                       round(sim['energy_kwh'].sum(), 1),
-                                       round(sim[sim['action']=='DISCHARGE']['energy_kwh'].sum(), 1),
-                                       round(sim['soc'].iloc[-1], 1)],
-                        "MILP": [milp_summary['total_net_revenue_eur'],
-                                 milp_summary['total_charged_kwh'],
-                                 milp_summary['total_discharged_kwh'],
-                                 milp_summary['final_soc_pct']]
-                    })
-                    st.dataframe(comp, use_container_width=True, hide_index=True)
+                f1, f2, f3, f4 = st.columns(4)
+                f1.metric(
+                    "Net Revenue (MILP)",
+                    f"{milp_summary['total_net_revenue_eur']:.2f} €",
+                    delta=f"{milp_summary['total_net_revenue_eur'] - rule_based_rev:+.2f} € vs Rule-based",
+                )
+                f2.metric(
+                    "Kosten (prijs > 0)",
+                    f"-{cost_pos:.2f} €",
+                    help="Betaald voor laden bij positieve prijs",
+                    delta_color="inverse",
+                )
+                f3.metric(
+                    "Inkomsten (prijs ≤ 0)",
+                    f"+{income_neg:.2f} €",
+                    help="Ontvangen voor laden bij negatieve prijs",
+                )
+                f4.metric(
+                    "Ontlaad-inkomsten",
+                    f"+{income_dis:.2f} €",
+                    help="Verdiend via ontladen bij hoge prijs",
+                )
 
-                except Exception as e:
-                    st.error(f"MILP failed: {e}")
+                # ── Comparison table ──────────────────────────────────────────
+                st.markdown("#### 📊 Rule-based vs MILP vergelijking")
+                comp = pd.DataFrame({
+                    "Metric": [
+                        "Net Revenue (€)", "Geladen (kWh)", "Ontladen (kWh)", "Eind SOC (%)"
+                    ],
+                    "Rule-based": [
+                        round(rule_based_rev, 2),
+                        round(sim["energy_kwh"].sum(), 1),
+                        round(sim[sim["action"] == "DISCHARGE"]["energy_kwh"].sum(), 1),
+                        round(sim["soc"].iloc[-1], 1),
+                    ],
+                    "MILP": [
+                        milp_summary["total_net_revenue_eur"],
+                        milp_summary["total_charged_kwh"],
+                        milp_summary["total_discharged_kwh"],
+                        milp_summary["final_soc_pct"],
+                    ],
+                })
+                st.dataframe(comp, use_container_width=True, hide_index=True)
 
-        if st.button("Reset MILP view"):
-            st.session_state.run_milp = False
+                # ── MILP actions chart ────────────────────────────────────────
+                st.markdown("#### 📋 MILP acties (actieve kwartieren)")
+                action_mask = (
+                    (milp_schedule["charge_kwh"] > 0.01) |
+                    (milp_schedule["discharge_kwh"] > 0.01)
+                )
+                detail_df = milp_schedule[action_mask][
+                    ["datetime", "price_eur_mwh", "charge_kwh", "discharge_kwh",
+                     "net_revenue_eur", "soc_pct"]
+                ].copy()
+                detail_df["Type"] = detail_df["net_revenue_eur"].apply(
+                    lambda x: "🟢 Inkomsten" if x > 0 else ("🔴 Kosten" if x < 0 else "⚪ Nul")
+                )
+                detail_df = detail_df.rename(columns={
+                    "datetime":        "Tijd",
+                    "price_eur_mwh":   "Prijs (€/MWh)",
+                    "charge_kwh":      "Laden (kWh)",
+                    "discharge_kwh":   "Ontladen (kWh)",
+                    "net_revenue_eur": "Slot Revenue (€)",
+                    "soc_pct":         "SOC (%)",
+                })
+                st.dataframe(detail_df, use_container_width=True, hide_index=True, height=400)
+
+                fig_milp = go.Figure()
+                fig_milp.add_trace(go.Scatter(
+                    x=milp_schedule["datetime"], y=milp_schedule["price_eur_mwh"],
+                    mode="lines", name="Prijs", line=dict(color="gray"),
+                ))
+                c_mask = milp_schedule["charge_kwh"] > 0.01
+                d_mask = milp_schedule["discharge_kwh"] > 0.01
+                fig_milp.add_trace(go.Scatter(
+                    x=milp_schedule[c_mask]["datetime"],
+                    y=milp_schedule[c_mask]["price_eur_mwh"],
+                    mode="markers", name="MILP LADEN",
+                    marker=dict(color="green", size=9, symbol="triangle-up"),
+                ))
+                fig_milp.add_trace(go.Scatter(
+                    x=milp_schedule[d_mask]["datetime"],
+                    y=milp_schedule[d_mask]["price_eur_mwh"],
+                    mode="markers", name="MILP ONTLADEN",
+                    marker=dict(color="red", size=9, symbol="triangle-down"),
+                ))
+                fig_milp.update_layout(
+                    title="MILP Optimale Acties", xaxis_title="Tijd", yaxis_title="€/MWh"
+                )
+                st.plotly_chart(fig_milp, use_container_width=True)
+
+                # ── Solver log (collapsed) ────────────────────────────────────
+                with st.expander("🔍 CBC Solver log (technisch)", expanded=False):
+                    st.code(milp_summary.get("solver_log", "Geen log beschikbaar."), language="text")
+
+                st.info(
+                    "⬆️ Scroll omhoog — de **SOC** en **Cumulative Revenue** grafieken "
+                    "tonen nu automatisch de MILP-curve in groen naast de rule-based curve."
+                )
+
+            except Exception as e:
+                progress_bar.progress(0)
+                status_box.error(f"MILP mislukt: {e}")
+                st.exception(e)
+
+        # ── Reset ─────────────────────────────────────────────────────────────
+        if st.button("🔄 Reset MILP"):
+            st.session_state.run_milp     = False
+            st.session_state.milp_schedule = None
+            st.session_state.milp_summary  = None
             st.rerun()
