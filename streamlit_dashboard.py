@@ -29,6 +29,20 @@ try:
 except ImportError:
     ELECTRICITY_MAPS_AVAILABLE = False
 
+# Fluvius Congestion Integration
+try:
+    from congestion_client import CongestionClient
+    CONGESTION_AVAILABLE = True
+except ImportError:
+    CONGESTION_AVAILABLE = False
+
+# NODES Flex Market Integration
+try:
+    from nodes_client import NodesClient
+    NODES_AVAILABLE = True
+except ImportError:
+    NODES_AVAILABLE = False
+
 st.set_page_config(page_title="EMS Belgium MVP Dashboard", layout="wide")
 st.title("⚡ EMS Belgium - Battery & Grid Intelligence Dashboard")
 st.markdown("**MVP Prototype** | Belgian day-ahead prices | Smart arbitrage + free electricity charging | Grid balancing")
@@ -261,6 +275,47 @@ st.plotly_chart(fig_price, use_container_width=True)
 neg_count = (sim_df['price_eur_mwh'] < 0).sum()
 if neg_count > 0:
     st.success(f"🎉 {neg_count} quarters with **negative prices** in this period → perfect moments for 'free or paid charging' + grid support!")
+
+# ==================== LIVE FLUVIUS + NODES FLEX MARKET ====================
+with st.expander("🌐 Live Fluvius Netcongestie & NODES Flex Market", expanded=True):
+    st.markdown("**Real-time grid intelligence** | Fluvius Capaciteitswijzer + NODES Flexibiliteitsmarkt")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📍 Fluvius Congestie")
+        if CONGESTION_AVAILABLE:
+            congestion_client = CongestionClient()
+            gemeente = st.text_input("Gemeente / Zone", value="Gent", key="fluvius_gemeente")
+            
+            if st.button("Haal Fluvius data op", key="btn_fluvius"):
+                with st.spinner("Fluvius data ophalen..."):
+                    summary = congestion_client.get_congestion_summary(gemeente)
+                    st.json(summary)
+                    
+                    df_cong = congestion_client.get_expected_congestion_hours(gemeente)
+                    if not df_cong.empty:
+                        st.dataframe(df_cong, use_container_width=True)
+        else:
+            st.warning("congestion_client.py niet gevonden. Run de integratie eerst.")
+    
+    with col2:
+        st.subheader("🔌 NODES Flex Market")
+        if NODES_AVAILABLE:
+            nodes_client = NodesClient()
+            
+            if st.button("Haal NODES marktstatus op", key="btn_nodes"):
+                with st.spinner("NODES data ophalen..."):
+                    nodes_summary = nodes_client.get_market_summary()
+                    st.json(nodes_summary)
+                    
+                    df_flex = nodes_client.get_available_flex_requests()
+                    if not df_flex.empty:
+                        st.dataframe(df_flex, use_container_width=True)
+                    else:
+                        st.info("Geen open flex requests op dit moment (of API key nodig).")
+        else:
+            st.warning("nodes_client.py niet gevonden. Run de integratie eerst.")
 
 # Simple simulation (re-run with sidebar params for interactivity)
 st.subheader("Battery Simulation Results (Rule-based MVP)")

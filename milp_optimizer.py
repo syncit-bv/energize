@@ -7,7 +7,7 @@ while respecting minimum SOC reserve (e.g. 10%).
 
 import pandas as pd
 import pulp
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 
 def optimize_battery_schedule(
@@ -25,12 +25,12 @@ def optimize_battery_schedule(
     Returns a DataFrame with optimal actions + summary dict.
     """
 
-    # Use the full dataframe passed in (for multi-day backtesting)
-    # Only limit if time_horizon_hours is explicitly smaller than the data
-    if time_horizon_hours and len(prices_df) > int(time_horizon_hours * 4):
-        df = prices_df.head(int(time_horizon_hours * 4)).copy()
-    else:
+    # Use full dataframe by default (important for multi-day backtesting)
+    if time_horizon_hours is None or time_horizon_hours <= 0:
         df = prices_df.copy()
+    else:
+        max_slots = int(time_horizon_hours * 4)
+        df = prices_df.head(max_slots).copy()
 
     if len(df) == 0:
         raise ValueError("No price data provided")
