@@ -25,8 +25,13 @@ def optimize_battery_schedule(
     Returns a DataFrame with optimal actions + summary dict.
     """
 
-    # Prepare data for the chosen horizon (use first N slots or full day)
-    df = prices_df.head(int(time_horizon_hours * 4)).copy()  # 4 quarters per hour
+    # Use the full dataframe passed in (for multi-day backtesting)
+    # Only limit if time_horizon_hours is explicitly smaller than the data
+    if time_horizon_hours and len(prices_df) > int(time_horizon_hours * 4):
+        df = prices_df.head(int(time_horizon_hours * 4)).copy()
+    else:
+        df = prices_df.copy()
+
     if len(df) == 0:
         raise ValueError("No price data provided")
 

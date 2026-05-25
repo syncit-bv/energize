@@ -24,7 +24,9 @@ Focus op arbitrage, "free/paid electricity" charging bij negatieve prijzen, grid
 6. Kies datumbereik en klik "Fetch & Load from ENTSOE"
 7. De dashboard update meteen met verse prijzen → klaar voor MILP optimalisatie!
 
-**Tip voor productie**: Maak een kleine cronjob/script die dagelijks na 15:00 `client.fetch_and_save_latest()` draait en de parquet update.
+**Tip voor productie**:
+- Maak een kleine cronjob/script die dagelijks na 15:00 `client.fetch_and_save_latest()` draait.
+- Zet je API keys in `.streamlit/secrets.toml` (zie voorbeeld in de map `.streamlit/`).
 
 ## Volgende stappen (roadmap)
 - [x] Live ENTSO-E + Electricity Maps integratie (prijzen + carbon intensity + forecasts)
