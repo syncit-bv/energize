@@ -6,3 +6,4 @@ requests>=2.31
 # Optional but recommended for full backtester
 # matplotlib
 # pyarrow
+# Test comment - connector write test
