@@ -2,6 +2,7 @@ streamlit>=1.32
 pandas>=2.0
 plotly>=5.20
 pulp>=2.7
+requests>=2.31
 # Optional but recommended for full backtester
 # matplotlib
 # pyarrow

@@ -14,6 +14,20 @@ from pathlib import Path
 # MILP Optimizer
 from milp_optimizer import optimize_battery_schedule
 
+# ENTSO-E Live Integration (optional but powerful for production EMS)
+try:
+    from entsoe_client import EntsoeClient
+    ENTSOE_AVAILABLE = True
+except ImportError:
+    ENTSOE_AVAILABLE = False
+
+# Electricity Maps Integration (carbon intensity + forecasts)
+try:
+    from electricity_maps_client import ElectricityMapsClient
+    ELECTRICITY_MAPS_AVAILABLE = True
+except ImportError:
+    ELECTRICITY_MAPS_AVAILABLE = False
+
 st.set_page_config(page_title="EMS Belgium MVP Dashboard", layout="wide")
 st.title("⚡ EMS Belgium - Battery & Grid Intelligence Dashboard")
 st.markdown("**MVP Prototype** | Belgian day-ahead prices | Smart arbitrage + free electricity charging | Grid balancing")
@@ -40,6 +54,90 @@ if "run_milp" not in st.session_state:
 if st.sidebar.button("🚀 Run MILP Optimization", type="primary"):
     st.session_state.run_milp = True
 
+# ENTSO-E Live Data Integration (NEW)
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔌 ENTSO-E Live Data")
+
+if ENTSOE_AVAILABLE:
+    with st.sidebar.expander("Fetch fresh prices from ENTSO-E Transparency Platform", expanded=False):
+        st.caption("Get the latest day-ahead prices automatically (requires free API key)")
+        
+        entsoe_key = st.text_input(
+            "ENTSO-E API Key", 
+            type="password",
+            value=st.session_state.get("entsoe_key", ""),
+            help="Get your free key at https://transparency.entsoe.eu/ → My Account → API Key"
+        )
+        
+        if entsoe_key:
+            st.session_state.entsoe_key = entsoe_key
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            fetch_start = st.date_input("From date", value=pd.to_datetime("2026-05-20").date(), key="fetch_start")
+        with col2:
+            fetch_end = st.date_input("To date", value=pd.to_datetime("2026-05-25").date(), key="fetch_end")
+        
+        if st.button("📥 Fetch & Load from ENTSO-E", type="secondary"):
+            if not entsoe_key:
+                st.error("Please enter your ENTSO-E API key first.")
+            else:
+                try:
+                    with st.spinner("Contacting ENTSO-E Transparency Platform..."):
+                        client = EntsoeClient(entsoe_key)
+                        new_df = client.get_day_ahead_prices(fetch_start, fetch_end)
+                        
+                        if not new_df.empty:
+                            st.session_state.df_prices = new_df
+                            st.success(f"✅ Loaded {len(new_df)} price points from ENTSO-E!")
+                            st.balloons()
+                            st.rerun()
+                        else:
+                            st.warning("No data returned. Check dates or try again later.")
+                except Exception as e:
+                    st.error(f"ENTSO-E fetch failed: {str(e)[:200]}")
+                    st.info("Tip: Make sure your API key is valid and you have internet access.")
+else:
+    st.sidebar.info("Install `requests` and ensure entsoe_client.py is present for live ENTSO-E integration.")
+
+# Electricity Maps Integration (NEW - Carbon + Forecasts)
+if ELECTRICITY_MAPS_AVAILABLE:
+    with st.sidebar.expander("🌍 Electricity Maps (Carbon + Forecasts)", expanded=False):
+        st.caption("Get carbon intensity + forecasts. Great for smart 'green charging' decisions.")
+        
+        em_key = st.text_input(
+            "Electricity Maps API Key",
+            type="password",
+            value=st.session_state.get("em_key", ""),
+            help="Sandbox or Production key from Electricity Maps"
+        )
+        
+        if em_key:
+            st.session_state.em_key = em_key
+        
+        em_zone = st.selectbox("Zone", ["BE", "DE", "FR", "NL"], index=0, key="em_zone")
+        
+        if st.button("📊 Fetch Carbon Data", type="secondary"):
+            if not em_key:
+                st.error("Please enter your Electricity Maps API key.")
+            else:
+                try:
+                    with st.spinner("Fetching from Electricity Maps..."):
+                        em_client = ElectricityMapsClient(em_key, use_sandbox=True)
+                        
+                        carbon_latest = em_client.get_carbon_intensity_latest(em_zone)
+                        carbon_forecast = em_client.get_carbon_intensity_forecast(em_zone)
+                        
+                        st.session_state.carbon_latest = carbon_latest
+                        st.session_state.carbon_forecast = carbon_forecast
+                        
+                        st.success(f"✅ Carbon data loaded for {em_zone}!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Electricity Maps error: {str(e)[:180]}")
+else:
+    st.sidebar.caption("electricity_maps_client.py not found.")
+
 # Extra metric the user requested
 max_energy_per_slot = max_power_kw * 0.25
 st.sidebar.metric("Max power per slot", f"{max_energy_per_slot:.3f} kWh", 
@@ -64,12 +162,12 @@ df = st.session_state.df_prices
 
 # If no data yet, allow upload of XML or parquet
 if df.empty:
-    st.warning("Geen prijzen-data gevonden. Upload de originele ENTSO-E XML of een prices_belgium.parquet bestand.")
+    st.warning("Geen prijzen-data gevonden. Upload ENTSO-E XML, gebruik de live ENTSO-E fetch hierboven, of laad een prices_belgium.parquet.")
     
     uploaded_file = st.file_uploader(
         "Upload ENTSO-E XML of prices_belgium.parquet",
         type=["xml", "parquet"],
-        help="De XML uit je attachments map, of de parquet die price_parser.py genereert."
+        help="De XML uit je attachments map, of de parquet die price_parser.py genereert. Of gebruik de ENTSO-E Live fetch in de sidebar!"
     )
     
     if uploaded_file is not None:
@@ -127,6 +225,14 @@ st.plotly_chart(fig_price, use_container_width=True)
 neg_count = (sim_df['price_eur_mwh'] < 0).sum()
 if neg_count > 0:
     st.success(f"🎉 {neg_count} quarters with **negative prices** in this period → perfect moments for 'free or paid charging' + grid support!")
+
+# Electricity Maps Carbon Insight (if fetched)
+if st.session_state.get("carbon_latest"):
+    carbon = st.session_state.carbon_latest
+    zone = st.session_state.get("em_zone", "BE")
+    ci = carbon.get("carbonIntensity", "N/A")
+    updated = str(carbon.get("updatedAt", ""))[:16]
+    st.info(f"🌍 **Carbon Intensity ({zone}):** {ci} gCO₂eq/kWh  |  Updated: {updated}")
 
 # Simple simulation (re-run with sidebar params for interactivity)
 st.subheader("Battery Simulation Results (Rule-based MVP)")
