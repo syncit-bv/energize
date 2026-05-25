@@ -54,94 +54,81 @@ if "run_milp" not in st.session_state:
 if st.sidebar.button("🚀 Run MILP Optimization", type="primary"):
     st.session_state.run_milp = True
 
-# ENTSO-E Live Data Integration (NEW)
+# ENTSO-E Live Data (alleen API key in sidebar)
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔌 ENTSO-E Live Data")
 
 if ENTSOE_AVAILABLE:
-    with st.sidebar.expander("Fetch fresh prices from ENTSO-E Transparency Platform", expanded=False):
-        st.caption("Get the latest day-ahead prices automatically (requires free API key)")
+    with st.sidebar.expander("Live prijzen ophalen via ENTSO-E", expanded=False):
+        st.caption("Vereist gratis API key van transparency.entsoe.eu")
         
         entsoe_key = st.text_input(
             "ENTSO-E API Key", 
             type="password",
             value=st.session_state.get("entsoe_key", ""),
-            help="Get your free key at https://transparency.entsoe.eu/ → My Account → API Key"
+            help="My Account → API Key"
         )
-        
         if entsoe_key:
             st.session_state.entsoe_key = entsoe_key
         
-        col1, col2 = st.columns(2)
-        with col1:
-            fetch_start = st.date_input("From date", value=pd.to_datetime("2026-05-20").date(), key="fetch_start")
-        with col2:
-            fetch_end = st.date_input("To date", value=pd.to_datetime("2026-05-25").date(), key="fetch_end")
-        
-        if st.button("📥 Fetch & Load from ENTSO-E", type="secondary"):
+        if st.button("📥 Haal laatste 7 dagen op", type="secondary"):
             if not entsoe_key:
-                st.error("Please enter your ENTSO-E API key first.")
+                st.error("Voer eerst je ENTSO-E API key in.")
             else:
                 try:
-                    with st.spinner("Contacting ENTSO-E Transparency Platform..."):
+                    with st.spinner("Ophalen van ENTSO-E..."):
                         client = EntsoeClient(entsoe_key)
-                        new_df = client.get_day_ahead_prices(fetch_start, fetch_end)
+                        end = date.today() + timedelta(days=1)
+                        start = end - timedelta(days=7)
+                        new_df = client.get_day_ahead_prices(start, end)
                         
                         if not new_df.empty:
                             st.session_state.df_prices = new_df
-                            st.success(f"✅ Loaded {len(new_df)} price points from ENTSO-E!")
-                            st.balloons()
+                            st.success(f"✅ {len(new_df)} prijzen geladen!")
                             st.rerun()
                         else:
-                            st.warning("No data returned. Check dates or try again later.")
+                            st.warning("Geen data gevonden.")
                 except Exception as e:
-                    st.error(f"ENTSO-E fetch failed: {str(e)[:200]}")
-                    st.info("Tip: Make sure your API key is valid and you have internet access.")
+                    st.error(f"Fout: {str(e)[:150]}")
 else:
-    st.sidebar.info("Install `requests` and ensure entsoe_client.py is present for live ENTSO-E integration.")
+    st.sidebar.caption("entsoe_client.py niet gevonden.")
 
 # Electricity Maps - Day-Ahead Prices (main focus right now)
 if ELECTRICITY_MAPS_AVAILABLE:
-    with st.sidebar.expander("🌍 Electricity Maps - Day-Ahead Prices", expanded=True):
-        st.caption("Fetch Day-Ahead electricity prices (uses the exact endpoint from the Developer Hub Playground)")
+    with st.sidebar.expander("🌍 Electricity Maps - Day-Ahead Prices", expanded=False):
+        st.caption("Fetch fresh Day-Ahead prices (v4 API)")
         
         em_key = st.text_input(
-            "Electricity Maps API Key (Sandbox or Production)",
+            "Electricity Maps API Key",
             type="password",
             value=st.session_state.get("em_key", ""),
-            help="Your key from Electricity Maps Developer Hub"
+            help="Sandbox or Production key"
         )
         if em_key:
             st.session_state.em_key = em_key
         
-        em_zone = st.selectbox("Zone", ["BE", "DE", "FR", "NL"], index=0, key="em_zone")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            em_start = st.date_input("Start date", value=pd.to_datetime("2026-05-24").date(), key="em_start")
-        with col2:
-            em_end = st.date_input("End date", value=pd.to_datetime("2026-05-25").date(), key="em_end")
-        
-        if st.button("📥 Fetch Day-Ahead Prices from Electricity Maps", type="secondary"):
+        if st.button("📥 Fetch Prices", type="secondary"):
             if not em_key:
                 st.error("Please enter your Electricity Maps API key.")
             else:
                 try:
-                    with st.spinner("Fetching prices from Electricity Maps..."):
+                    with st.spinner("Fetching from Electricity Maps..."):
                         em_client = ElectricityMapsClient(em_key)
-                        new_df = em_client.get_day_ahead_prices(em_zone, em_start, em_end)
+                        # Fetch last 7 days by default
+                        end = date.today() + timedelta(days=1)
+                        start = end - timedelta(days=7)
+                        new_df = em_client.get_day_ahead_prices("BE", start, end)
                         
                         if not new_df.empty:
                             st.session_state.df_prices = new_df
-                            st.success(f"✅ Loaded {len(new_df)} price points from Electricity Maps!")
+                            st.success(f"✅ {len(new_df)} prijzen geladen!")
                             st.rerun()
                         else:
-                            st.warning("No data returned. Try different dates.")
+                            st.warning("Geen data gevonden.")
                 except Exception as e:
-                    st.error(f"Electricity Maps error: {str(e)}")
-                    st.info("Check your Sandbox key and try zone 'BE' or 'DE'.")
+                    st.error(f"Fout: {str(e)[:150]}")
 else:
-    st.sidebar.caption("electricity_maps_client.py not found.")
+    st.sidebar.caption("electricity_maps_client.py niet gevonden.")
 
 # Extra metric the user requested
 max_energy_per_slot = max_power_kw * 0.25
@@ -219,20 +206,25 @@ if "date_start" not in st.session_state or "date_end" not in st.session_state:
     st.session_state.date_end = max_date
     st.session_state.date_start = max(min_date, max_date - pd.Timedelta(days=6))
 
-# Quick view buttons
+# Quick view buttons (with active highlighting)
 col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+
+is_today = (st.session_state.date_start == st.session_state.date_end == max_date)
+is_week = (st.session_state.date_end == max_date) and (st.session_state.date_start == max(min_date, max_date - pd.Timedelta(days=6)))
+is_month = (st.session_state.date_end == max_date) and (st.session_state.date_start == max(min_date, max_date.replace(day=1)))
+
 with col1:
-    if st.button("📅 Vandaag", use_container_width=True):
+    if st.button("📅 Vandaag", type="primary" if is_today else "secondary", use_container_width=True):
         st.session_state.date_start = max_date
         st.session_state.date_end = max_date
         st.rerun()
 with col2:
-    if st.button("📆 Deze Week", use_container_width=True):
+    if st.button("📆 Deze Week", type="primary" if is_week else "secondary", use_container_width=True):
         st.session_state.date_end = max_date
         st.session_state.date_start = max(min_date, max_date - pd.Timedelta(days=6))
         st.rerun()
 with col3:
-    if st.button("🗓️ Deze Maand", use_container_width=True):
+    if st.button("🗓️ Deze Maand", type="primary" if is_month else "secondary", use_container_width=True):
         st.session_state.date_end = max_date
         first_of_month = max_date.replace(day=1)
         st.session_state.date_start = max(min_date, first_of_month)
