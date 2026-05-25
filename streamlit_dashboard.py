@@ -207,15 +207,53 @@ if st.session_state.df_prices.empty:
 
 df = st.session_state.df_prices  # ensure we use the session state version
 
-# Date range selector
 min_date = df['datetime'].min().date()
 max_date = df['datetime'].max().date()
-date_range = st.date_input("Select period for analysis", 
-                           value=(pd.to_datetime("2026-04-25").date(), pd.to_datetime("2026-05-03").date()),
-                           min_value=min_date, max_value=max_date)
 
-# Filter
-mask = (df['datetime'].dt.date >= date_range[0]) & (df['datetime'].dt.date <= date_range[1])
+# === Quick View Buttons + Date Range ===
+st.subheader("📅 Analyse Periode")
+
+# Initialize session state for dates if not present
+if "date_start" not in st.session_state or "date_end" not in st.session_state:
+    # Default = laatste 7 dagen (huidige week)
+    st.session_state.date_end = max_date
+    st.session_state.date_start = max(min_date, max_date - pd.Timedelta(days=6))
+
+# Quick view buttons
+col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+with col1:
+    if st.button("📅 Vandaag", use_container_width=True):
+        st.session_state.date_start = max_date
+        st.session_state.date_end = max_date
+        st.rerun()
+with col2:
+    if st.button("📆 Deze Week", use_container_width=True):
+        st.session_state.date_end = max_date
+        st.session_state.date_start = max(min_date, max_date - pd.Timedelta(days=6))
+        st.rerun()
+with col3:
+    if st.button("🗓️ Deze Maand", use_container_width=True):
+        st.session_state.date_end = max_date
+        first_of_month = max_date.replace(day=1)
+        st.session_state.date_start = max(min_date, first_of_month)
+        st.rerun()
+
+# Date range picker (controlled by session state)
+date_range = st.date_input(
+    "Of kies een eigen periode:",
+    value=(st.session_state.date_start, st.session_state.date_end),
+    min_value=min_date,
+    max_value=max_date,
+    key="date_range_picker"
+)
+
+# Update session state if user manually changes the date_input
+if date_range[0] != st.session_state.date_start or date_range[1] != st.session_state.date_end:
+    st.session_state.date_start = date_range[0]
+    st.session_state.date_end = date_range[1]
+
+# Filter data
+mask = (df['datetime'].dt.date >= st.session_state.date_start) & (df['datetime'].dt.date <= st.session_state.date_end)
 sim_df = df[mask].copy()
 
 st.subheader(f"Price Overview ({date_range[0]} → {date_range[1]})")
