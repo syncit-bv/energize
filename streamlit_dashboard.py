@@ -100,41 +100,46 @@ if ENTSOE_AVAILABLE:
 else:
     st.sidebar.info("Install `requests` and ensure entsoe_client.py is present for live ENTSO-E integration.")
 
-# Electricity Maps Integration (NEW - Carbon + Forecasts)
+# Electricity Maps - Day-Ahead Prices (main focus right now)
 if ELECTRICITY_MAPS_AVAILABLE:
-    with st.sidebar.expander("🌍 Electricity Maps (Carbon + Forecasts)", expanded=False):
-        st.caption("Get carbon intensity + forecasts. Great for smart 'green charging' decisions.")
+    with st.sidebar.expander("🌍 Electricity Maps - Day-Ahead Prices", expanded=True):
+        st.caption("Fetch Day-Ahead electricity prices (uses the exact endpoint from the Developer Hub Playground)")
         
         em_key = st.text_input(
-            "Electricity Maps API Key",
+            "Electricity Maps API Key (Sandbox or Production)",
             type="password",
             value=st.session_state.get("em_key", ""),
-            help="Sandbox or Production key from Electricity Maps"
+            help="Your key from Electricity Maps Developer Hub"
         )
-        
         if em_key:
             st.session_state.em_key = em_key
         
         em_zone = st.selectbox("Zone", ["BE", "DE", "FR", "NL"], index=0, key="em_zone")
         
-        if st.button("📊 Fetch Carbon Data", type="secondary"):
+        col1, col2 = st.columns(2)
+        with col1:
+            em_start = st.date_input("Start date", value=pd.to_datetime("2026-05-24").date(), key="em_start")
+        with col2:
+            em_end = st.date_input("End date", value=pd.to_datetime("2026-05-25").date(), key="em_end")
+        
+        if st.button("📥 Fetch Day-Ahead Prices from Electricity Maps", type="secondary"):
             if not em_key:
                 st.error("Please enter your Electricity Maps API key.")
             else:
                 try:
-                    with st.spinner("Fetching from Electricity Maps..."):
-                        em_client = ElectricityMapsClient(em_key, use_sandbox=True)
+                    with st.spinner("Fetching prices from Electricity Maps..."):
+                        em_client = ElectricityMapsClient(em_key)
+                        new_df = em_client.get_day_ahead_prices(em_zone, em_start, em_end)
                         
-                        carbon_latest = em_client.get_carbon_intensity_latest(em_zone)
-                        carbon_forecast = em_client.get_carbon_intensity_forecast(em_zone)
-                        
-                        st.session_state.carbon_latest = carbon_latest
-                        st.session_state.carbon_forecast = carbon_forecast
-                        
-                        st.success(f"✅ Carbon data loaded for {em_zone}!")
-                        st.rerun()
+                        if not new_df.empty:
+                            st.session_state.df_prices = new_df
+                            st.success(f"✅ Loaded {len(new_df)} price points from Electricity Maps!")
+                            st.rerun()
+                        else:
+                            st.warning("No data returned. Try different dates.")
                 except Exception as e:
-                    st.error(f"Electricity Maps error: {str(e)[:180]}")
+                    st.error(f"Electricity Maps error: {str(e)}")
+                    st.info("Check your Sandbox key and try zone 'BE' or 'DE'.")
 else:
     st.sidebar.caption("electricity_maps_client.py not found.")
 
@@ -225,14 +230,6 @@ st.plotly_chart(fig_price, use_container_width=True)
 neg_count = (sim_df['price_eur_mwh'] < 0).sum()
 if neg_count > 0:
     st.success(f"🎉 {neg_count} quarters with **negative prices** in this period → perfect moments for 'free or paid charging' + grid support!")
-
-# Electricity Maps Carbon Insight (if fetched)
-if st.session_state.get("carbon_latest"):
-    carbon = st.session_state.carbon_latest
-    zone = st.session_state.get("em_zone", "BE")
-    ci = carbon.get("carbonIntensity", "N/A")
-    updated = str(carbon.get("updatedAt", ""))[:16]
-    st.info(f"🌍 **Carbon Intensity ({zone}):** {ci} gCO₂eq/kWh  |  Updated: {updated}")
 
 # Simple simulation (re-run with sidebar params for interactivity)
 st.subheader("Battery Simulation Results (Rule-based MVP)")

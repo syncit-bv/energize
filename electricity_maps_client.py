@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 """
 Electricity Maps API Client for EMS Belgium
-Useful for carbon intensity, forecasts, and price data.
+Focus: Day-Ahead Electricity Prices via /v3/price-day-ahead/actual
 
-Sandbox / Production API key required.
-Documentation: https://docs.electricitymaps.com/
-
-Common useful endpoints for battery optimization:
-- Carbon intensity (current + forecast)
-- Power breakdown
-- Price data (where available)
+This matches exactly the endpoint shown in the Electricity Maps Developer Hub Playground.
 """
 
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime, date
 from typing import Optional, Dict, Any
 import time
 
@@ -23,42 +16,24 @@ BASE_URL = "https://api.electricitymaps.com/v3"
 
 
 class ElectricityMapsClient:
-    def __init__(self, api_key: str, use_sandbox: bool = True):
-        """
-        Initialize client.
-        
-        Args:
-            api_key: Your Electricity Maps API key (Sandbox or Production)
-            use_sandbox: If True, use sandbox endpoint (for testing)
-        """
+    def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("Electricity Maps API key is required.")
         
         self.api_key = api_key
-        self.use_sandbox = use_sandbox
-        
         self.session = requests.Session()
         self.session.headers.update({
             "auth-token": api_key,
             "Accept": "application/json"
         })
-        
-        # Use sandbox base if testing
-        if use_sandbox:
-            # Sandbox often uses same base but with test key
-            self.base_url = BASE_URL
-        else:
-            self.base_url = BASE_URL
 
     def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
-        """Internal request handler with basic retry."""
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        url = f"{BASE_URL}/{endpoint.lstrip('/')}"
         
-        max_retries = 2
+        max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = self.session.get(url, params=params, timeout=20)
-                
+                response = self.session.get(url, params=params, timeout=25)
                 if response.status_code == 200:
                     return response.json()
                 elif response.status_code == 429:
@@ -68,122 +43,65 @@ class ElectricityMapsClient:
                     continue
                 else:
                     response.raise_for_status()
-                    
             except requests.exceptions.RequestException as e:
                 if attempt == max_retries - 1:
                     raise Exception(f"Electricity Maps API error: {e}")
                 time.sleep(1)
-        
-        raise Exception("Failed to get valid response from Electricity Maps")
+        raise Exception("Failed after retries")
 
-    # ==================== CARBON INTENSITY ====================
-    
-    def get_carbon_intensity_latest(self, zone: str = "BE") -> Dict[str, Any]:
-        """Get latest carbon intensity for a zone (e.g. 'BE' for Belgium)."""
-        return self._make_request(f"carbon-intensity/latest", params={"zone": zone})
-
-    def get_carbon_intensity_history(
+    def get_day_ahead_prices(
         self, 
         zone: str = "BE", 
-        start: Optional[str] = None, 
-        end: Optional[str] = None
+        start: Optional[str | date] = None, 
+        end: Optional[str | date] = None
     ) -> pd.DataFrame:
         """
-        Get historical carbon intensity.
-        Returns DataFrame with datetime and carbon intensity (gCO2eq/kWh).
+        Fetch Day-Ahead Prices.
+        Uses the exact endpoint from the Developer Hub Playground: /price-day-ahead/actual
         """
         params = {"zone": zone}
+        
         if start:
-            params["start"] = start
+            if isinstance(start, date) and not isinstance(start, datetime):
+                start = datetime.combine(start, datetime.min.time())
+            params["start"] = start.strftime("%Y-%m-%dT%H:%M:%S.000Z") if isinstance(start, datetime) else start
+        
         if end:
-            params["end"] = end
+            if isinstance(end, date) and not isinstance(end, datetime):
+                end = datetime.combine(end, datetime.min.time())
+            params["end"] = end.strftime("%Y-%m-%dT%H:%M:%S.000Z") if isinstance(end, datetime) else end
+
+        data = self._make_request("price-day-ahead/actual", params=params)
+        
+        if "data" not in data or not data.get("data"):
+            return pd.DataFrame(columns=['datetime', 'price_eur_mwh', 'date', 'hour', 'quarter', 'price_eur_kwh'])
+        
+        records = []
+        for item in data["data"]:
+            dt = datetime.fromisoformat(item["datetime"].replace("Z", "+00:00"))
+            price = float(item["value"])
             
-        data = self._make_request("carbon-intensity/history", params=params)
-        
-        if "history" not in data:
-            return pd.DataFrame()
-        
-        records = []
-        for item in data["history"]:
-            dt = datetime.fromisoformat(item["datetime"].replace("Z", "+00:00"))
             records.append({
                 "datetime": dt,
-                "carbon_intensity_gco2_kwh": item.get("carbonIntensity"),
-                "zone": zone,
-                "is_forecast": False
+                "price_eur_mwh": price,
+                "date": dt.date(),
+                "hour": dt.hour,
+                "quarter": (dt.minute // 15) + 1
             })
         
-        return pd.DataFrame(records).sort_values("datetime").reset_index(drop=True)
-
-    def get_carbon_intensity_forecast(self, zone: str = "BE") -> pd.DataFrame:
-        """Get carbon intensity forecast."""
-        data = self._make_request("carbon-intensity/forecast", params={"zone": zone})
-        
-        if "forecast" not in data:
-            return pd.DataFrame()
-        
-        records = []
-        for item in data["forecast"]:
-            dt = datetime.fromisoformat(item["datetime"].replace("Z", "+00:00"))
-            records.append({
-                "datetime": dt,
-                "carbon_intensity_gco2_kwh": item.get("carbonIntensity"),
-                "zone": zone,
-                "is_forecast": True
-            })
-        
-        return pd.DataFrame(records).sort_values("datetime").reset_index(drop=True)
-
-    # ==================== PRICE DATA (if available for zone) ====================
-    
-    def get_price_latest(self, zone: str = "BE") -> Dict[str, Any]:
-        """Get latest electricity price (where available)."""
-        try:
-            return self._make_request("price/latest", params={"zone": zone})
-        except Exception:
-            return {"error": "Price data not available for this zone or plan"}
-
-    # ==================== CONVENIENCE ====================
-    
-    def get_full_insight(self, zone: str = "BE") -> Dict[str, Any]:
-        """
-        Get a combined view useful for battery optimization decisions.
-        Includes current carbon + price (if available).
-        """
-        result = {
-            "zone": zone,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        try:
-            result["carbon_latest"] = self.get_carbon_intensity_latest(zone)
-        except Exception as e:
-            result["carbon_latest"] = {"error": str(e)}
-        
-        try:
-            result["price_latest"] = self.get_price_latest(zone)
-        except Exception as e:
-            result["price_latest"] = {"error": str(e)}
-        
-        return result
+        df = pd.DataFrame(records).sort_values("datetime").reset_index(drop=True)
+        df["price_eur_kwh"] = df["price_eur_mwh"] / 1000.0
+        return df
 
 
 if __name__ == "__main__":
-    # Example usage with Sandbox key
-    SANDBOX_KEY = "YOUR_SANDBOX_KEY_HERE"
+    # Test with your Sandbox key
+    SANDBOX_KEY = "UYf4kmp5qvGC8B2qjFhc"
     
-    client = ElectricityMapsClient(SANDBOX_KEY, use_sandbox=True)
+    client = ElectricityMapsClient(SANDBOX_KEY)
     
-    print("=== Carbon Intensity Latest (Belgium) ===")
-    try:
-        carbon = client.get_carbon_intensity_latest("BE")
-        print(carbon)
-    except Exception as e:
-        print(f"Error: {e}")
+    print("Fetching Day-Ahead Prices BE (24-25 May 2026)...")
+    df = client.get_day_ahead_prices("BE", "2026-05-24", "2026-05-25")
     
-    print("\n=== Carbon Forecast (first 3) ===")
-    try:
-        forecast = client.get_carbon_intensity_forecast("BE")
-        print(forecast.head(3))
-    except Exception as e:
-        print(f"Error: {e}")
+    print(df.head(10))
+    print(f"\nTotal: {len(df)} rows | Negative prices: {(df['price_eur_mwh'] < 0).sum()}")
