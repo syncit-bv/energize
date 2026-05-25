@@ -28,6 +28,9 @@ negative_boost = st.sidebar.checkbox("Aggressive charge on negative prices", val
 min_soc_pct = st.sidebar.slider("Minimum SOC reserve (%)", min_value=0, max_value=30, value=10, step=1,
                                 help="Batterij nooit verder ontladen dan dit percentage. Beschermt de batterij en laat altijd buffer over.")
 
+min_end_soc_pct = st.sidebar.slider("Minimum End-of-Horizon SOC (%)", min_value=10, max_value=50, value=20, step=5,
+                                    help="Minimum SOC aan het einde van de optimalisatie horizon. Voorkomt dat je 's avonds op 10% eindigt en de volgende dag niet kunt laden.")
+
 st.sidebar.markdown("---")
 
 # MILP button placed in sidebar with other controls
@@ -242,6 +245,7 @@ if st.session_state.get("run_milp", False):
                         battery_kwh=battery_kwh,
                         max_power_kw=max_power_kw,
                         min_soc=min_soc_pct / 100,
+                        min_end_soc=min_end_soc_pct / 100,
                         initial_soc=0.50
                     )
 

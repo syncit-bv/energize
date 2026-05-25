@@ -15,6 +15,7 @@ def optimize_battery_schedule(
     battery_kwh: float = 10.0,
     max_power_kw: float = 5.0,
     min_soc: float = 0.10,
+    min_end_soc: float = 0.20,
     efficiency: float = 0.92,
     initial_soc: float = 0.50,
     time_horizon_hours: int = 24
@@ -65,6 +66,9 @@ def optimize_battery_schedule(
         prob += discharge[t] <= max_energy_per_slot, f"Max_discharge_{t}"
 
         # SOC bounds already set in variable definition (min_soc and max)
+
+    # Terminal SOC constraint (end of horizon) - prevents ending at absolute minimum
+    prob += soc[T] >= min_end_soc * battery_kwh, "Min_End_SOC"
 
     # Solve
     status = prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=30))
