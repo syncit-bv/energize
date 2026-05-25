@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Electricity Maps API Client for EMS Belgium
-Focus: Day-Ahead Electricity Prices via /v3/price-day-ahead/actual
+Focus: Day-Ahead Electricity Prices (v4 API)
 
-This matches exactly the endpoint shown in the Electricity Maps Developer Hub Playground.
+Using the v4 endpoint as requested.
 """
 
 import requests
@@ -12,7 +12,7 @@ from datetime import datetime, date
 from typing import Optional, Dict, Any
 import time
 
-BASE_URL = "https://api.electricitymaps.com/v3"
+BASE_URL = "https://api.electricitymaps.com/v4"  # v4 as per Developer Hub request
 
 
 class ElectricityMapsClient:
@@ -29,6 +29,11 @@ class ElectricityMapsClient:
 
     def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
         url = f"{BASE_URL}/{endpoint.lstrip('/')}"
+        
+        # Fallback: send key both in header (already set) and as query param
+        if params is None:
+            params = {}
+        params["auth-token"] = self.api_key
         
         max_retries = 3
         for attempt in range(max_retries):
