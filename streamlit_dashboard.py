@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Energize EMS - Step 1: Clean Minimal Working Dashboard
+Energize EMS - Step 2: Real MILP Optimization
 """
 
 import streamlit as st
@@ -25,7 +25,6 @@ with st.sidebar:
     st.divider()
     st.subheader("Live Data")
 
-    # Robust key reading
     em_key = st.secrets.get("em_key", "")
     if isinstance(em_key, str):
         em_key = em_key.strip()
@@ -34,10 +33,6 @@ with st.sidebar:
         st.success("✅ Electricity Maps key geladen")
     else:
         st.error("⚠️ Electricity Maps key niet geldig in secrets")
-        st.info("Settings → Secrets → em_key toevoegen")
-
-    if st.button("Reboot App", type="secondary"):
-        st.rerun()
 
 # ==================== WINSTOVERZICHT ====================
 st.subheader("💰 Winstoverzicht")
@@ -83,12 +78,41 @@ else:
             except Exception as e:
                 st.error(f"Fout: {e}")
 
-# ==================== MILP ====================
+# ==================== MILP OPTIMALISATIE (Stap 2) ====================
 st.subheader("🚀 MILP Optimalisatie")
 
-if st.button("Run MILP (meerdere dagen)", type="primary"):
-    with st.spinner("Bezig..."):
-        st.success("MILP demo uitgevoerd (volledige versie volgt in stap 2)")
+if st.button("Run MILP Optimization (meerdere dagen)", type="primary"):
+    with st.spinner("MILP optimalisatie draaien over de geselecteerde periode..."):
+        try:
+            milp_schedule, milp_summary = optimize_battery_schedule(
+                sim_df,
+                battery_kwh=battery_kwh,
+                max_power_kw=max_power_kw,
+                min_soc=min_soc_pct / 100,
+                min_end_soc=0.20,
+                initial_soc=0.50
+            )
+            
+            st.session_state.milp_schedule = milp_schedule
+            st.session_state.milp_summary = milp_summary
+            
+            st.success(f"MILP succesvol! Status: {milp_summary.get('status', 'OK')}")
+            
+            # Basis metrics
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Net Revenue", f"{milp_summary['total_net_revenue_eur']:.2f} €")
+            col2.metric("Charged", f"{milp_summary['total_charged_kwh']:.1f} kWh")
+            col3.metric("Discharged", f"{milp_summary['total_discharged_kwh']:.1f} kWh")
+            col4.metric("Final SOC", f"{milp_summary['final_soc_pct']:.1f} %")
+            
+            # Eenvoudige actie tabel
+            st.markdown("#### MILP Acties (enkele rijen)")
+            action_mask = (milp_schedule['charge_kwh'] > 0.01) | (milp_schedule['discharge_kwh'] > 0.01)
+            detail = milp_schedule[action_mask][['datetime', 'price_eur_mwh', 'charge_kwh', 'discharge_kwh', 'net_revenue_eur']].head(12)
+            st.dataframe(detail, use_container_width=True, hide_index=True)
+            
+        except Exception as e:
+            st.error(f"MILP fout: {e}")
 
 # ==================== FLUVIUS + NODES ====================
 with st.expander("🌐 Live Fluvius & NODES", expanded=False):
@@ -106,4 +130,4 @@ with st.expander("🌐 Live Fluvius & NODES", expanded=False):
             except Exception as e:
                 st.error(str(e))
 
-st.caption("Energize EMS - Stap 1: Clean minimal version")
+st.caption("Energize EMS - Stap 2: Real MILP optimization")
