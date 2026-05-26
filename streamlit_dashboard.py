@@ -758,71 +758,223 @@ if milp_ready:
 # Elia Grid Intelligence
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
-with st.expander("⚡ Elia Grid Intelligence — Imbalance & aFRR", expanded=False):
+with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast", expanded=False):
     st.markdown(
-        "**Elia** is de Belgische TSO. De imbalance-tarieven tonen hoeveel je verdient "
-        "als je het net helpt stabiliseren (via aggregator zoals Yuso).\n\n"
-        "- **MIP** *(Marginal Incremental Price)*: prijs voor ontladen — hoog MIP = ontladen is winstgevend\n"
-        "- **MDP** *(Marginal Decremental Price)*: prijs voor laden — laag/negatief MDP = laden wordt betaald\n"
-        "- **NRV** *(Net Regulation Volume)*: positief = grid is short (stroom tekort)\n"
-        "- **aFRR**: automatische frequentie-restauratie reserve — snelle balanceringsdienst"
+        "**Elia** is de Belgische TSO (opendata.elia.be — geen API key nodig).\n\n"
+        "**Imbalance tarieven** tonen hoeveel je verdient als je het net helpt via aggregator (Yuso):\n"
+        "- **MIP**: prijs voor ontladen (upward regulation) — hoog = ontladen is winstgevend\n"
+        "- **MDP**: prijs voor laden (downward regulation) — laag/negatief = laden wordt betaald\n"
+        "- **NRV**: Net Regulation Volume (MW) — positief = grid tekort, negatief = grid overschot\n\n"
+        "**Solar PV forecast** (ods087/ods032) toont verwachte zonne-energie productie — "
+        "hoge solar morgen = verwacht lage/negatieve prijzen 10u–14u = optimaal laadmoment."
     )
 
     if not ELIA_AVAILABLE:
         st.warning("elia_client.py niet gevonden.")
     else:
-        elia_col1, elia_col2 = st.columns(2)
+        # ── Tabs: Imbalance | Solar ──
+        tab_imb, tab_solar = st.tabs(["⚡ Imbalance Prijzen", "☀️ Solar PV Forecast"])
 
-        with elia_col1:
-            if st.button("📡 Haal huidige Elia imbalance op", key="btn_elia_live"):
-                with st.spinner("Elia Open Data ophalen…"):
-                    try:
-                        ec   = EliaClient()
-                        snap = ec.get_latest_imbalance()
-                        if snap.get("nrv_mw") is not None:
-                            e1, e2, e3 = st.columns(3)
-                            e1.metric("NRV (MW)",     f"{snap['nrv_mw']:.0f}")
-                            e2.metric("MIP (€/MWh)",  f"{snap['mip_eur_mwh']:.2f}" if snap.get('mip_eur_mwh') else "—")
-                            e3.metric("MDP (€/MWh)",  f"{snap['mdp_eur_mwh']:.2f}" if snap.get('mdp_eur_mwh') else "—")
-                            st.info(snap.get("grid_state", ""))
-                        else:
-                            st.json(snap)
-                    except Exception as e:
-                        st.error(f"Elia fout: {e}")
+        # ── TAB 1: Imbalance ──────────────────────────────────────────────────
+        with tab_imb:
+            btn_col1, btn_col2 = st.columns(2)
 
-        with elia_col2:
-            if st.button("📊 Imbalance profiel van vandaag", key="btn_elia_today"):
-                with st.spinner("Elia imbalance data ophalen…"):
-                    try:
-                        ec    = EliaClient()
-                        df_im = ec.get_imbalance_prices(today, tomorrow)
-                        if not df_im.empty:
-                            fig_im = go.Figure()
-                            fig_im.add_trace(go.Scatter(x=df_im["datetime"], y=df_im["mip_eur_mwh"],
-                                mode="lines", name="MIP (ontladen)", line=dict(color="red", width=2)))
-                            fig_im.add_trace(go.Scatter(x=df_im["datetime"], y=df_im["mdp_eur_mwh"],
-                                mode="lines", name="MDP (laden)", line=dict(color="green", width=2)))
-                            fig_im.add_trace(go.Bar(x=df_im["datetime"], y=df_im["nrv_mw"],
-                                name="NRV (MW)", marker_color="rgba(100,100,200,0.3)",
-                                yaxis="y2"))
-                            fig_im.update_layout(
-                                title="Elia Imbalance Prijzen + NRV",
-                                xaxis_title="Tijd",
-                                yaxis=dict(title="€/MWh"),
-                                yaxis2=dict(title="NRV (MW)", overlaying="y", side="right"),
-                                legend=dict(x=0, y=1.1, orientation="h"),
-                            )
-                            st.plotly_chart(fig_im, use_container_width=True)
+            with btn_col1:
+                if st.button("📡 Huidige snapshot", key="btn_elia_live"):
+                    with st.spinner("Elia real-time ophalen…"):
+                        try:
+                            ec   = EliaClient()
+                            snap = ec.get_latest_imbalance()
+                            if snap.get("nrv_mw") is not None:
+                                e1, e2, e3 = st.columns(3)
+                                e1.metric("NRV (MW)",    f"{snap['nrv_mw']:.0f}")
+                                e2.metric("MIP (€/MWh)", f"{snap['mip_eur_mwh']:.2f}" if snap.get("mip_eur_mwh") else "—")
+                                e3.metric("MDP (€/MWh)", f"{snap['mdp_eur_mwh']:.2f}" if snap.get("mdp_eur_mwh") else "—")
+                                st.info(snap.get("grid_state", ""))
+                                st.caption(f"Tijdstip: {snap.get('datetime', '—')}")
+                            else:
+                                # Geen data (bv. 's nachts eerste kwartier)
+                                st.warning(snap.get("status", "Geen data"))
+                                if snap.get("tip"):
+                                    st.info(snap["tip"])
+                        except Exception as e:
+                            st.error(f"Elia fout: {e}")
 
-                            intel = ec.get_ems_intelligence(today)
-                            i1, i2, i3 = st.columns(3)
-                            i1.metric("Grid short kwartieren", intel.get("grid_short_qtrs", "—"))
-                            i2.metric("Gem. MIP",  f"{intel.get('avg_mip_eur_mwh', 0):.2f} €/MWh")
-                            i3.metric("Peak MIP",  f"{intel.get('peak_mip_eur_mwh', 0):.2f} €/MWh")
-                        else:
-                            st.info("Geen Elia imbalance data voor vandaag (mogelijk vertraging van 1-2 kwartieren).")
-                    except Exception as e:
-                        st.error(f"Elia fout: {e}")
+            with btn_col2:
+                if st.button("📊 Imbalance profiel", key="btn_elia_today"):
+                    with st.spinner("Elia imbalance profiel ophalen (met slimme fallback)…"):
+                        try:
+                            ec = EliaClient()
+                            # Gebruik slimme fallback: real-time → historisch → gisteren
+                            df_im, bron_label = ec.get_imbalance_best_available(today)
+
+                            if bron_label.startswith("⚠️"):
+                                st.warning(bron_label)
+                            else:
+                                st.success(f"✅ {bron_label}")
+
+                            if not df_im.empty:
+                                # Veilig kolommen ophalen — check bestaan voor plot
+                                mip_col = "mip_eur_mwh" if "mip_eur_mwh" in df_im.columns else None
+                                mdp_col = "mdp_eur_mwh" if "mdp_eur_mwh" in df_im.columns else None
+                                nrv_col = "nrv_mw"      if "nrv_mw"      in df_im.columns else None
+                                dt_col  = "datetime"    if "datetime"    in df_im.columns else None
+
+                                if dt_col and (mip_col or nrv_col):
+                                    fig_im = go.Figure()
+                                    if mip_col:
+                                        fig_im.add_trace(go.Scatter(
+                                            x=df_im[dt_col], y=df_im[mip_col],
+                                            mode="lines", name="MIP (ontladen €/MWh)",
+                                            line=dict(color="red", width=2)))
+                                    if mdp_col:
+                                        fig_im.add_trace(go.Scatter(
+                                            x=df_im[dt_col], y=df_im[mdp_col],
+                                            mode="lines", name="MDP (laden €/MWh)",
+                                            line=dict(color="green", width=2)))
+                                    if nrv_col:
+                                        fig_im.add_trace(go.Bar(
+                                            x=df_im[dt_col], y=df_im[nrv_col],
+                                            name="NRV (MW)",
+                                            marker_color="rgba(100,100,200,0.3)",
+                                            yaxis="y2"))
+                                    fig_im.update_layout(
+                                        title="Elia Imbalance Prijzen + NRV",
+                                        xaxis_title="Tijd",
+                                        yaxis=dict(title="€/MWh"),
+                                        yaxis2=dict(title="NRV (MW)", overlaying="y", side="right"),
+                                        legend=dict(x=0, y=1.1, orientation="h"),
+                                    )
+                                    st.plotly_chart(fig_im, use_container_width=True)
+
+                                    # EMS metrics — veilig ophalen
+                                    intel = ec.get_ems_intelligence(today)
+                                    i1, i2, i3, i4 = st.columns(4)
+                                    i1.metric("Kwartieren geanalyseerd", intel.get("quarters_analyzed", "—"))
+                                    i2.metric("Grid short kwartieren",   intel.get("grid_short_qtrs", "—"))
+                                    i3.metric("Gem. MIP", f"{intel.get('avg_mip_eur_mwh') or 0:.2f} €/MWh"
+                                              if intel.get("avg_mip_eur_mwh") is not None else "—")
+                                    i4.metric("Peak MIP", f"{intel.get('peak_mip_eur_mwh') or 0:.2f} €/MWh"
+                                              if intel.get("peak_mip_eur_mwh") is not None else "—")
+
+                                    # Ruwe data tabel (inklapbaar)
+                                    with st.expander("📋 Ruwe imbalance data", expanded=False):
+                                        show_cols = [c for c in ["datetime","nrv_mw","si_mw",
+                                                                   "mip_eur_mwh","mdp_eur_mwh","alpha"]
+                                                     if c in df_im.columns]
+                                        st.dataframe(df_im[show_cols], use_container_width=True,
+                                                     hide_index=True, height=300)
+                                else:
+                                    st.info(f"Kolommen in data: {list(df_im.columns)}")
+                                    st.dataframe(df_im.head(10), use_container_width=True)
+                            else:
+                                st.info(
+                                    "Geen imbalance data beschikbaar. Mogelijke oorzaken:\n"
+                                    "- 's Nachts (00:00-00:15): eerste kwartier nog niet verstreken\n"
+                                    "- Verbindingsprobleem met opendata.elia.be\n"
+                                    "- Elia data vertraging (normaal: < 30 minuten)"
+                                )
+                        except Exception as e:
+                            st.error(f"Elia fout: {e}")
+                            st.caption("Tip: controleer of 'elia-py' geïnstalleerd is: `pip install elia-py`")
+
+        # ── TAB 2: Solar PV Forecast ──────────────────────────────────────────
+        with tab_solar:
+            st.markdown(
+                "**Zonnepanelen forecast voor België** via Elia (ods087 = actueel, ods032 = historisch).\n\n"
+                "Strategisch belang voor EMS:\n"
+                "- Hoge solar piek morgen → verwacht **negatieve/lage prijzen 10u–14u** → plan **laden**\n"
+                "- Hoge solar vandaag + hoge prijzen 's avonds → **laden → ontladen** cyclus is winstgevend\n"
+                "- Combineer solar forecast met ENTSO-E day-ahead voor nauwkeurige MILP-input"
+            )
+
+            sol_col1, sol_col2 = st.columns(2)
+
+            with sol_col1:
+                if st.button("☀️ Actuele solar forecast (ods087)", key="btn_solar_now"):
+                    with st.spinner("Elia solar forecast ophalen…"):
+                        try:
+                            ec       = EliaClient()
+                            df_sol   = ec.get_solar_forecast()
+                            advice   = ec.get_solar_ems_advice()
+
+                            if not df_sol.empty:
+                                st.success(f"✅ {len(df_sol)} rijen geladen")
+                                st.info(f"💡 **EMS Advies:** {advice.get('advice', '—')}")
+
+                                # Zoek beschikbare forecast kolommen
+                                plot_cols = [c for c in df_sol.columns
+                                             if c not in ("datetime", "region")
+                                             and df_sol[c].dtype in ("float64", "int64")]
+
+                                if plot_cols and "datetime" in df_sol.columns:
+                                    fig_sol = go.Figure()
+                                    colors = ["#FFA500","#FFD700","#FF8C00","#FFC300"]
+                                    for i, col in enumerate(plot_cols[:4]):
+                                        fig_sol.add_trace(go.Scatter(
+                                            x=df_sol["datetime"], y=df_sol[col],
+                                            mode="lines", name=col,
+                                            line=dict(color=colors[i % len(colors)], width=2)))
+                                    fig_sol.update_layout(
+                                        title="Solar PV Forecast België (MW)",
+                                        xaxis_title="Tijd", yaxis_title="MW",
+                                        legend=dict(x=0, y=1.1, orientation="h"))
+                                    st.plotly_chart(fig_sol, use_container_width=True)
+
+                                # Morgen specifiek
+                                if advice.get("tomorrow_peak_mw"):
+                                    tm1, tm2, tm3 = st.columns(3)
+                                    tm1.metric("Piek morgen (MW)",  f"{advice['tomorrow_peak_mw']:.0f}")
+                                    tm2.metric("Piek tijdstip",     advice.get("tomorrow_peak_time", "—")[-5:])
+                                    tm3.metric("Totaal morgen (MWh)", f"{advice.get('tomorrow_total_mwh', 0):.0f}")
+
+                                with st.expander("📋 Ruwe solar data + kolomnamen", expanded=False):
+                                    st.caption(f"Kolommen: {list(df_sol.columns)}")
+                                    st.dataframe(df_sol.head(20), use_container_width=True, hide_index=True)
+                            else:
+                                st.warning("Geen solar forecast data. Controleer verbinding met opendata.elia.be")
+                        except Exception as e:
+                            st.error(f"Solar fout: {e}")
+
+            with sol_col2:
+                st.markdown("**Historische solar productie (ods032)**")
+                hist_days = st.slider("Dagen terug", 1, 30, 7, key="solar_hist_days")
+                if st.button("📅 Haal historische solar op (ods032)", key="btn_solar_hist"):
+                    with st.spinner("Historische solar ophalen…"):
+                        try:
+                            ec       = EliaClient()
+                            hist_end = dt.date.today()
+                            hist_start = hist_end - dt.timedelta(days=hist_days)
+                            df_hist  = ec.get_historical_solar(hist_start, hist_end)
+
+                            if not df_hist.empty:
+                                st.success(f"✅ {len(df_hist)} rijen | {hist_days} dagen historische solar")
+
+                                plot_cols = [c for c in df_hist.columns
+                                             if c not in ("datetime","region")
+                                             and df_hist[c].dtype in ("float64","int64")]
+
+                                if plot_cols and "datetime" in df_hist.columns:
+                                    fig_hist = go.Figure()
+                                    for col in plot_cols[:3]:
+                                        fig_hist.add_trace(go.Scatter(
+                                            x=df_hist["datetime"], y=df_hist[col],
+                                            mode="lines", name=col))
+                                    fig_hist.update_layout(
+                                        title=f"Historische Solar PV (ods032) — {hist_days} dagen",
+                                        xaxis_title="Tijd", yaxis_title="MW")
+                                    st.plotly_chart(fig_hist, use_container_width=True)
+
+                                st.caption(
+                                    "💡 Correleer deze data met de day-ahead prijzen: op dagen met hoge "
+                                    "solar productie zie je typisch lage/negatieve prijzen 10u–14u."
+                                )
+                                with st.expander("📋 Data", expanded=False):
+                                    st.dataframe(df_hist.head(50), use_container_width=True, hide_index=True)
+                            else:
+                                st.warning("Geen historische solar data.")
+                        except Exception as e:
+                            st.error(f"Solar historisch fout: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Intraday Pricing (placeholder — EPEX SPOT data niet gratis beschikbaar)
