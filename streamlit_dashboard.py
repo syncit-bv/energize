@@ -11,7 +11,11 @@ import plotly.graph_objects as go
 from pathlib import Path
 from datetime import date, timedelta, datetime, timezone
 
-from milp_optimizer import optimize_battery_schedule
+from milp_optimizer import (
+    optimize_battery_schedule,
+    optimize_battery_schedule_solar,
+    estimate_own_solar_kwh,
+)
 
 try:
     from entsoe_client import EntsoeClient
@@ -118,10 +122,23 @@ initial_soc_pct = st.sidebar.slider(
     help="Werkelijke batterij-SOC nu. In productie: uitlezen uit BMS."
 )
 
+own_kwp = st.sidebar.slider(
+    "Eigen PV-vermogen (kWp)", 0.0, 20.0, 6.3, 0.1,
+    help="Jouw zonnepanelen vermogen. 0 = geen eigen PV. Wordt gebruikt voor MILP+Solar scenario."
+)
+
 if st.sidebar.button("🚀 Run MILP Optimalisatie", type="primary", use_container_width=True):
     st.session_state.milp_pending      = True
+    st.session_state.scenarios_pending = False
     st.session_state.milp_schedule     = None
     st.session_state.milp_summary      = None
+    st.session_state.milp_initial_soc  = initial_soc_pct / 100
+
+if st.sidebar.button("🔬 Vergelijk alle scenario's", type="secondary", use_container_width=True,
+                      help="Vergelijkt: Rule-based | MILP basis | MILP+Day-ahead | MILP+Solar"):
+    st.session_state.scenarios_pending = True
+    st.session_state.milp_pending      = False
+    st.session_state.scenarios         = {}
     st.session_state.milp_initial_soc  = initial_soc_pct / 100
 
 st.sidebar.metric("Max energie/slot (15 min)", f"{max_power_kw * 0.25:.2f} kWh")
@@ -219,7 +236,9 @@ def load_parquet():
 
 if "df_prices" not in st.session_state:
     st.session_state.df_prices = load_parquet()
-if "milp_pending"  not in st.session_state: st.session_state.milp_pending  = False
+if "milp_pending"       not in st.session_state: st.session_state.milp_pending       = False
+if "scenarios_pending"  not in st.session_state: st.session_state.scenarios_pending  = False
+if "scenarios"          not in st.session_state: st.session_state.scenarios          = {}
 if "milp_schedule" not in st.session_state: st.session_state.milp_schedule = None
 if "milp_summary"  not in st.session_state: st.session_state.milp_summary  = None
 
@@ -511,7 +530,92 @@ if st.session_state.milp_pending:
     st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rule-based simulation
+# Scenario comparison runner (runs all 4, stores in session_state.scenarios)
+# ─────────────────────────────────────────────────────────────────────────────
+if st.session_state.get("scenarios_pending"):
+    init_soc   = st.session_state.get("milp_initial_soc", 0.50)
+    milp_args  = dict(
+        battery_kwh=battery_kwh, max_power_kw=max_power_kw,
+        min_soc=min_soc_pct / 100, min_end_soc=min_end_soc_pct / 100,
+        initial_soc=init_soc, time_horizon_hours=None,
+    )
+
+    # Build day-ahead extended input if available
+    da_pub        = day_ahead_published()
+    tomorrow_data = df[df["datetime"].dt.date == tomorrow]
+    tomorrow_avail = not tomorrow_data.empty
+
+    if da_pub and tomorrow_avail and sel_end >= today:
+        milp_da_input = pd.concat([sim_df, tomorrow_data]).drop_duplicates(
+            "datetime").sort_values("datetime").reset_index(drop=True)
+        da_label = f"Day-ahead beschikbaar ({fdate(tomorrow)})"
+    else:
+        milp_da_input = sim_df.copy()
+        da_label = "Geen day-ahead (periode-only)"
+
+    total_steps = 4 if own_kwp > 0 else 3
+    prog = st.progress(0, text="Scenario's voorbereiden…")
+
+    scenarios = {}
+    errors    = {}
+
+    try:
+        prog.progress(10, text="▶ Scenario 1/4: MILP Basis (geselecteerde periode)…")
+        sch1, s1 = optimize_battery_schedule(sim_df, label="MILP Basis", **milp_args)
+        scenarios["milp_basic"] = (sch1, s1)
+        prog.progress(35, text="▶ Scenario 2/4: MILP + Day-ahead…")
+    except Exception as e:
+        errors["milp_basic"] = str(e)
+        prog.progress(35)
+
+    try:
+        sch2, s2 = optimize_battery_schedule(
+            milp_da_input, label=f"MILP+DA ({da_label})", **milp_args)
+        scenarios["milp_da"] = (sch2, s2)
+        prog.progress(65, text="▶ Scenario 3/4: MILP + Day-ahead + Solar…")
+    except Exception as e:
+        errors["milp_da"] = str(e)
+        prog.progress(65)
+
+    if own_kwp > 0:
+        try:
+            # Fetch solar data for scenario 4
+            solar_kwh = pd.Series(dtype=float)
+            if ELIA_AVAILABLE:
+                try:
+                    ec       = EliaClient()
+                    df_sol   = ec.get_solar_forecast()
+                    if df_sol.empty:
+                        df_sol = ec.get_historical_solar(sel_start, sel_end + timedelta(days=1))
+                    if not df_sol.empty:
+                        solar_kwh = estimate_own_solar_kwh(df_sol, own_kwp=own_kwp)
+                except Exception:
+                    solar_kwh = pd.Series(dtype=float)
+
+            sch3, s3 = optimize_battery_schedule_solar(
+                milp_da_input, solar_kwh, label="MILP+DA+Solar", **milp_args)
+            s3["solar_own_kwp"] = own_kwp
+            scenarios["milp_solar"] = (sch3, s3)
+        except Exception as e:
+            errors["milp_solar"] = str(e)
+    else:
+        prog.progress(90)
+
+    prog.progress(100, text="✅ Alle scenario's berekend!")
+
+    st.session_state.scenarios         = scenarios
+    st.session_state.scenarios_pending = False
+    st.session_state.scenario_errors   = errors
+
+    # Also store last MILP+DA as the main milp_schedule for the charts above
+    if "milp_da" in scenarios:
+        sch_da, summ_da = scenarios["milp_da"]
+        st.session_state.milp_schedule = sch_da
+        st.session_state.milp_summary  = summ_da
+
+    st.rerun()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh,
                    neg_boost, min_soc=0.10, init_soc=0.50):
@@ -755,7 +859,191 @@ if milp_ready:
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Elia Grid Intelligence
+# Scenario vergelijking (4 scenario's: Rule-based | MILP basis | +DA | +Solar)
+# ─────────────────────────────────────────────────────────────────────────────
+if st.session_state.get("scenarios"):
+    st.markdown("---")
+    st.subheader("🔬 Scenario Vergelijking — De Kracht van EMS Optimalisatie")
+    st.markdown(
+        "Vier scenario's naast elkaar: van eenvoudige regelgebaseerde logica tot "
+        "volledige MILP-optimalisatie met day-ahead én solar intelligence."
+    )
+
+    scen        = st.session_state.scenarios
+    scen_errors = st.session_state.get("scenario_errors", {})
+
+    # ── Kleurenpalet per scenario ──────────────────────────────────────────
+    COLORS = {
+        "rule_based":  ("royalblue",  "Rule-based",           "— —"),
+        "milp_basic":  ("#E67E22",    "MILP Basis",           "—"),
+        "milp_da":     ("#27AE60",    "MILP + Day-ahead",     "dot"),
+        "milp_solar":  ("#8E44AD",    "MILP + DA + Solar ☀️", "dashdot"),
+    }
+
+    # ── Samenvattingstabel ─────────────────────────────────────────────────
+    rows = []
+    rb_rev = sim["cum_rev"].iloc[-1]
+
+    rows.append({
+        "Scenario":       "1️⃣ Rule-based",
+        "Net Revenue (€)": f"{rb_rev:.2f}",
+        "Geladen (kWh)":  f"{sim['energy_kwh'].sum():.1f}",
+        "Ontladen (kWh)": f"{sim[sim['action']=='DISCHARGE']['energy_kwh'].sum():.1f}",
+        "Eind SOC (%)":   f"{sim['soc'].iloc[-1]:.1f}",
+        "Verbetering":    "—",
+        "Solver":         "n.v.t.",
+    })
+
+    emoji = ["2️⃣", "3️⃣", "4️⃣"]
+    keys  = ["milp_basic", "milp_da", "milp_solar"]
+    names = ["MILP Basis", "MILP + Day-ahead", "MILP + DA + Solar ☀️"]
+
+    for i, (key, name) in enumerate(zip(keys, names)):
+        if key in scen:
+            _, s = scen[key]
+            rev  = s["total_net_revenue_eur"]
+            rows.append({
+                "Scenario":        f"{emoji[i]} {name}",
+                "Net Revenue (€)":  f"{rev:.2f}",
+                "Geladen (kWh)":    f"{s['total_charged_kwh']:.1f}",
+                "Ontladen (kWh)":   f"{s['total_discharged_kwh']:.1f}",
+                "Eind SOC (%)":     f"{s['final_soc_pct']:.1f}",
+                "Verbetering":      f"+{rev - rb_rev:.2f} €" if rev > rb_rev else f"{rev - rb_rev:.2f} €",
+                "Solver":           f"{s['status']} | {s['solve_time_sec']}s | {s['solver_iterations']:,} iter",
+            })
+        elif key in scen_errors:
+            rows.append({
+                "Scenario": f"{emoji[i]} {name}",
+                "Net Revenue (€)": "❌",
+                "Geladen (kWh)": "—", "Ontladen (kWh)": "—",
+                "Eind SOC (%)": "—", "Verbetering": "—",
+                "Solver": scen_errors[key][:60],
+            })
+
+    comp_df = pd.DataFrame(rows)
+    st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+    # ── Revenue vergelijking bar chart ─────────────────────────────────────
+    bar_labels = [r["Scenario"] for r in rows]
+    bar_values = []
+    bar_colors = ["royalblue", "#E67E22", "#27AE60", "#8E44AD"]
+    for r in rows:
+        try:
+            bar_values.append(float(r["Net Revenue (€)"]))
+        except ValueError:
+            bar_values.append(0.0)
+
+    fig_bar = go.Figure(go.Bar(
+        x=bar_labels, y=bar_values,
+        marker_color=bar_colors[:len(bar_labels)],
+        text=[f"{v:.2f} €" for v in bar_values],
+        textposition="outside",
+    ))
+    fig_bar.update_layout(
+        title="Net Revenue per Scenario (€)",
+        yaxis_title="€", xaxis_title="",
+        showlegend=False,
+        height=350,
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ── SOC overlay ────────────────────────────────────────────────────────
+    fig_soc_all = go.Figure()
+    fig_soc_all.add_trace(go.Scatter(
+        x=sim["datetime"], y=sim["soc"],
+        mode="lines", name="Rule-based",
+        line=dict(color="royalblue", width=1.5, dash="dash")))
+
+    for key, name, dash_style in [
+        ("milp_basic", "MILP Basis",         "dash"),
+        ("milp_da",    "MILP + Day-ahead",   "dot"),
+        ("milp_solar", "MILP + DA + Solar ☀️","dashdot"),
+    ]:
+        if key in scen:
+            sch_k, _ = scen[key]
+            # Toon enkel de geselecteerde periode (niet tomorrow extension)
+            sch_period = sch_k[sch_k["datetime"].dt.date <= sel_end]
+            color = COLORS[key][0]
+            fig_soc_all.add_trace(go.Scatter(
+                x=sch_period["datetime"], y=sch_period["soc_pct"],
+                mode="lines", name=name,
+                line=dict(color=color, width=2, dash=dash_style)))
+
+    fig_soc_all.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange",
+        annotation_text=f"Min {min_soc_pct}% reserve")
+    fig_soc_all.update_yaxes(range=[0, 100], title="SOC (%)")
+    fig_soc_all.update_layout(
+        title="Battery State of Charge — Alle Scenario's",
+        xaxis_title="Tijd",
+        legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig_soc_all, use_container_width=True)
+
+    # ── Cumulatieve revenue overlay ────────────────────────────────────────
+    fig_rev_all = go.Figure()
+    fig_rev_all.add_trace(go.Scatter(
+        x=sim["datetime"], y=sim["cum_rev"],
+        mode="lines", name="Rule-based",
+        line=dict(color="royalblue", width=1.5, dash="dash")))
+
+    for key, name, dash_style in [
+        ("milp_basic", "MILP Basis",         "dash"),
+        ("milp_da",    "MILP + Day-ahead",   "dot"),
+        ("milp_solar", "MILP + DA + Solar ☀️","dashdot"),
+    ]:
+        if key in scen:
+            sch_k, _ = scen[key]
+            sch_period = sch_k[sch_k["datetime"].dt.date <= sel_end].copy()
+            sch_period["cum_rev"] = sch_period["net_revenue_eur"].cumsum()
+            color = COLORS[key][0]
+            fig_rev_all.add_trace(go.Scatter(
+                x=sch_period["datetime"], y=sch_period["cum_rev"],
+                mode="lines", name=name,
+                line=dict(color=color, width=2, dash=dash_style)))
+
+    fig_rev_all.update_layout(
+        title="Cumulatieve Revenue — Alle Scenario's (€)",
+        xaxis_title="Tijd", yaxis_title="€",
+        legend=dict(orientation="h", y=-0.2))
+    st.plotly_chart(fig_rev_all, use_container_width=True)
+
+    # ── Solar detail (alleen als scenario 4 beschikbaar) ──────────────────
+    if "milp_solar" in scen:
+        sch_sol, s_sol = scen["milp_solar"]
+        if "charge_solar_kwh" in sch_sol.columns:
+            solar_total = sch_sol["charge_solar_kwh"].sum()
+            grid_total  = sch_sol["charge_grid_kwh"].sum()
+            if solar_total > 0.01:
+                st.markdown("#### ☀️ Solar Self-Consumption Detail")
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Geladen via solar (gratis)", f"{solar_total:.1f} kWh",
+                           help="Laden vanuit eigen PV — geen gridkost")
+                sc2.metric("Geladen via net",            f"{grid_total:.1f} kWh")
+                sc3.metric("Solar waarde",
+                           f"{solar_total * sch_sol.merge(pd.DataFrame({'datetime': sch_sol['datetime'], 'p': sch_sol['price_eur_mwh']}), on='datetime', how='left')['p'].mean() / 1000:.2f} €" if False else
+                           f"~{solar_total * abs(sch_sol['price_eur_mwh'].mean()) / 1000:.2f} €",
+                           help="Geschatte besparing t.o.v. kopen van net aan gemiddelde prijs")
+
+                fig_solar_split = go.Figure()
+                fig_solar_split.add_trace(go.Bar(
+                    x=sch_sol["datetime"], y=sch_sol["charge_grid_kwh"],
+                    name="Laden van net", marker_color="#E67E22"))
+                fig_solar_split.add_trace(go.Bar(
+                    x=sch_sol["datetime"], y=sch_sol["charge_solar_kwh"],
+                    name="Laden van solar ☀️", marker_color="#F39C12"))
+                fig_solar_split.update_layout(
+                    barmode="stack",
+                    title="Laadprofiel MILP+Solar: Grid vs Solar per kwartier",
+                    xaxis_title="Tijd", yaxis_title="kWh",
+                    legend=dict(orientation="h", y=-0.2))
+                st.plotly_chart(fig_solar_split, use_container_width=True)
+
+    if st.button("🔄 Reset scenario vergelijking"):
+        st.session_state.scenarios         = {}
+        st.session_state.scenario_errors   = {}
+        st.session_state.scenarios_pending = False
+        st.rerun()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("---")
 with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast", expanded=False):
