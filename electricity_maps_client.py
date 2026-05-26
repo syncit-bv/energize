@@ -1,112 +1,131 @@
 #!/usr/bin/env python3
 """
 Electricity Maps API Client for EMS Belgium
-Focus: Day-Ahead Electricity Prices (v4 API)
+Endpoint: /v4/price-day-ahead/combined  (actual + forecast, hourly)
 
-Using the v4 endpoint as requested.
+Notes:
+- Sandbox key gives ~24h of intentionally inaccurate data (integration testing only).
+- Production key gives real prices + multi-day forecasts.
+- Data is HOURLY → expanded to 4× 15-min slots so MILP works correctly.
+- Source is nordpool.com (same as ENTSO-E). For long historical backtests,
+  use entsoe_client.py instead (free, unlimited history).
 """
 
 import requests
 import pandas as pd
-from datetime import datetime, date
-from typing import Optional, Dict, Any
+from datetime import datetime, date, timedelta
+from typing import Optional
 import time
 
-BASE_URL = "https://api.electricitymaps.com/v4"  # v4 as per Developer Hub request
+
+BASE_URL = "https://api.electricitymaps.com/v4"
 
 
 class ElectricityMapsClient:
     def __init__(self, api_key: str):
         if not api_key:
             raise ValueError("Electricity Maps API key is required.")
-        
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update({
             "auth-token": api_key,
-            "Accept": "application/json"
+            "Accept": "application/json",
         })
 
-    def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+    def _get(self, endpoint: str, params: Optional[dict] = None) -> dict:
         url = f"{BASE_URL}/{endpoint.lstrip('/')}"
-        
-        # Fallback: send key both in header (already set) and as query param
-        if params is None:
-            params = {}
-        params["auth-token"] = self.api_key
-        
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(3):
             try:
-                response = self.session.get(url, params=params, timeout=25)
-                if response.status_code == 200:
-                    return response.json()
-                elif response.status_code == 429:
-                    wait = 2 ** attempt
-                    print(f"Rate limit. Waiting {wait}s...")
-                    time.sleep(wait)
+                r = self.session.get(url, params=params or {}, timeout=25)
+                if r.status_code == 200:
+                    return r.json()
+                if r.status_code == 429:
+                    time.sleep(2 ** attempt)
                     continue
-                else:
-                    response.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                if attempt == max_retries - 1:
+                r.raise_for_status()
+            except requests.RequestException as e:
+                if attempt == 2:
                     raise Exception(f"Electricity Maps API error: {e}")
                 time.sleep(1)
-        raise Exception("Failed after retries")
+        raise Exception("Electricity Maps: failed after retries")
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Main method: combined day-ahead prices (actual + forecast)
+    # ──────────────────────────────────────────────────────────────────────────
     def get_day_ahead_prices(
-        self, 
-        zone: str = "BE", 
-        start: Optional[str | date] = None, 
-        end: Optional[str | date] = None
+        self,
+        zone: str = "BE",
+        start: Optional[date] = None,
+        end:   Optional[date] = None,
     ) -> pd.DataFrame:
         """
-        Fetch Day-Ahead Prices.
-        Uses the exact endpoint from the Developer Hub Playground: /price-day-ahead/actual
+        Fetch day-ahead prices via /price-day-ahead/combined.
+
+        Returns a DataFrame with 15-min slots (hourly price repeated × 4)
+        so it is directly compatible with the MILP optimizer and rule-based sim.
+
+        Columns: datetime, price_eur_mwh, date, hour, quarter, price_eur_kwh, source
         """
-        params = {"zone": zone}
-        
+        data = self._get("price-day-ahead/combined", params={"zone": zone})
+
+        records = data.get("data") or data.get("prices") or []
+        if not records:
+            return _empty_df()
+
+        rows = []
+        for item in records:
+            raw_dt = item.get("datetime") or item.get("timestamp")
+            if not raw_dt:
+                continue
+            dt_hour = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+            price   = float(item["value"])
+            src     = item.get("source", "electricitymaps")
+
+            # Expand 1 hourly price → 4 quarter-hour slots (00, 15, 30, 45)
+            for q in range(4):
+                dt_slot = dt_hour + timedelta(minutes=15 * q)
+                rows.append({
+                    "datetime":      dt_slot,
+                    "price_eur_mwh": price,
+                    "date":          dt_slot.date(),
+                    "hour":          dt_slot.hour,
+                    "quarter":       q + 1,
+                    "price_eur_kwh": price / 1000.0,
+                    "source":        src,
+                })
+
+        df = pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
+
+        # Optional date filter (sandbox ignores start/end but production may support it)
         if start:
-            if isinstance(start, date) and not isinstance(start, datetime):
-                start = datetime.combine(start, datetime.min.time())
-            params["start"] = start.strftime("%Y-%m-%dT%H:%M:%S.000Z") if isinstance(start, datetime) else start
-        
+            df = df[df["date"] >= (start if isinstance(start, date) else start.date())]
         if end:
-            if isinstance(end, date) and not isinstance(end, datetime):
-                end = datetime.combine(end, datetime.min.time())
-            params["end"] = end.strftime("%Y-%m-%dT%H:%M:%S.000Z") if isinstance(end, datetime) else end
+            df = df[df["date"] <= (end   if isinstance(end,   date) else end.date())]
 
-        data = self._make_request("price-day-ahead/actual", params=params)
-        
-        if "data" not in data or not data.get("data"):
-            return pd.DataFrame(columns=['datetime', 'price_eur_mwh', 'date', 'hour', 'quarter', 'price_eur_kwh'])
-        
-        records = []
-        for item in data["data"]:
-            dt = datetime.fromisoformat(item["datetime"].replace("Z", "+00:00"))
-            price = float(item["value"])
-            
-            records.append({
-                "datetime": dt,
-                "price_eur_mwh": price,
-                "date": dt.date(),
-                "hour": dt.hour,
-                "quarter": (dt.minute // 15) + 1
-            })
-        
-        df = pd.DataFrame(records).sort_values("datetime").reset_index(drop=True)
-        df["price_eur_kwh"] = df["price_eur_mwh"] / 1000.0
-        return df
+        return df.reset_index(drop=True)
+
+    def get_carbon_intensity(self, zone: str = "BE") -> dict:
+        """Current carbon intensity (gCO₂eq/kWh) — useful for green charging logic."""
+        return self._get("carbon-intensity/latest", params={"zone": zone})
 
 
+def _empty_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=[
+        "datetime", "price_eur_mwh", "date", "hour", "quarter",
+        "price_eur_kwh", "source",
+    ])
+
+
+# ── Quick test ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Test with your Sandbox key
     SANDBOX_KEY = "UYf4kmp5qvGC8B2qjFhc"
-    
     client = ElectricityMapsClient(SANDBOX_KEY)
-    
-    print("Fetching Day-Ahead Prices BE (24-25 May 2026)...")
-    df = client.get_day_ahead_prices("BE", "2026-05-24", "2026-05-25")
-    
-    print(df.head(10))
-    print(f"\nTotal: {len(df)} rows | Negative prices: {(df['price_eur_mwh'] < 0).sum()}")
+
+    print("Fetching combined day-ahead prices for BE…")
+    df = client.get_day_ahead_prices("BE")
+
+    print(f"\nRows returned : {len(df)}  (hourly prices × 4 = 15-min slots)")
+    print(f"Period        : {df['datetime'].min()} → {df['datetime'].max()}")
+    print(f"Negative slots: {(df['price_eur_mwh'] < 0).sum()}")
+    print(f"Sources       : {df['source'].unique()}")
+    print(f"\nSample:\n{df[['datetime','price_eur_mwh','quarter','source']].head(12).to_string()}")
