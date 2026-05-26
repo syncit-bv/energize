@@ -170,12 +170,43 @@ if "milp_full" in st.session_state or "milp_conservative" in st.session_state:
         s = st.session_state.milp_conservative["summary"]
         st.write(f"**MILP zónder day-ahead** → Net Revenue: **{s['total_net_revenue_eur']:.2f} €**")
 
-# ====================== ELIA ======================
-with st.expander("🌐 Elia Grid Intelligence", expanded=False):
+# ====================== ELIA GRID INTELLIGENCE ======================
+with st.expander("🌐 Elia Grid Intelligence (Congestie & Real-time)", expanded=True):
     if ELIA_AVAILABLE:
         elia = EliaClient()
-        if st.button("Haal Elia data op"):
-            st.json(elia.get_market_summary())
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("Congestie / Red Zones")
+            if st.button("Haal Elia Congestie data"):
+                df_cong = elia.get_congestion_zones(limit=30)
+                if not df_cong.empty:
+                    st.dataframe(df_cong.head(15), use_container_width=True)
+
+                    # Visualisatie
+                    if "congestion_level" in df_cong.columns or "expected_impact_eur_mwh" in df_cong.columns:
+                        fig = px.bar(
+                            df_cong.head(8),
+                            x="zone" if "zone" in df_cong.columns else df_cong.columns[0],
+                            y="expected_impact_eur_mwh" if "expected_impact_eur_mwh" in df_cong.columns else df_cong.columns[1],
+                            color="congestion_level" if "congestion_level" in df_cong.columns else None,
+                            title="Verwachte congestie-impact per zone (€/MWh)",
+                            color_discrete_map={"Hoog": "#e74c3c", "Medium": "#f39c12", "Laag": "#27ae60"}
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Geen congestie data gevonden (mogelijk tijdelijk).")
+
+        with col2:
+            st.subheader("Market Summary")
+            summary = elia.get_market_summary()
+            st.json(summary)
+
+            if st.button("Haal Real-time Generatie"):
+                df_gen = elia.get_real_time_generation(last_hours=6)
+                if not df_gen.empty:
+                    st.dataframe(df_gen.head(10), use_container_width=True)
     else:
         st.info("elia_client.py nog niet volledig geïntegreerd.")
 
