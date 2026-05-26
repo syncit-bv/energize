@@ -1,337 +1,205 @@
 #!/usr/bin/env python3
 """
 Elia Open Data Client voor EMS Belgium
-=========================================
-Elia is de Belgische TSO (Transmission System Operator).
+=======================================
+Gebaseerd op de officiële elia-py bibliotheek (pip install elia-py).
 
-Endpoints (opendata.elia.be/api/explore/v2.1/):
-  ods032 → Imbalance prijzen per kwartier (MIP / MDP / alpha / NRV / SI)
-  ods031 → Systeem onbalans (NRV in MW)
-  ods086 → aFRR geactiveerd volume (upward/downward)
-  ods088 → mFRR geactiveerd volume
-  ods001 → Totale belasting BE (real-time)
-  ods023 → Berekende onbalans-tarieven (voorlopig, T-1)
+Correcte dataset IDs (geverifieerd via elia-py source):
+  ods162  → Near real-time imbalance prijzen, kwartierlijks (huidige dag)
+  ods134  → Historische imbalance prijzen, kwartierlijks (na MARI 22/05/2024)
+  ods047  → Historische imbalance prijzen, kwartierlijks (vóór MARI, deprecated)
+  ods161  → Imbalance prijzen per minuut (near real-time)
+  ods169  → Systeem onbalans real-time (per minuut)
 
-Relevantie voor EMS:
-  • MIP (Marginal Incremental Price): prijs als je omhoog regelt (ontladen = verkopen)
-    → Hoog MIP = ontladen is zeer winstgevend (grid heeft stroom nodig)
-  • MDP (Marginal Decremental Price): prijs als je omlaag regelt (laden)
-    → Laag/negatief MDP = laden wordt betaald (grid heeft absorptie nodig)
-  • NRV (Net Regulation Volume): positief = grid is short, negatief = long
-    → Grote positieve NRV = batterij ontladen is waardevol
-  • alpha: imbalance coefficient (1 of 0.85) — bepaalt of je de MIP of de spot
-    prijs ontvangt bij positieve onbalans
+EMS relevantie:
+  MIP: Marginal Incremental Price — prijs voor ontladen (upward regulation)
+  MDP: Marginal Decremental Price — prijs voor laden (downward regulation)
+  NRV: Net Regulation Volume (MW) — positief = grid short, negatief = long
 """
 
-import requests
-import pandas as pd
-from datetime import datetime, date, timedelta
+from __future__ import annotations
+import datetime as dt
 from typing import Optional, Dict, Any
-import time
+import pandas as pd
 
-
-BASE_URL = "https://opendata.elia.be/api/explore/v2.1/catalog/datasets"
-
-# Dataset IDs op Elia Open Data Platform
-DATASETS = {
-    "imbalance_prices":  "ods032",   # MIP, MDP, alpha, NRV, SI — kwartierlijks
-    "system_imbalance":  "ods031",   # NRV volume (MW) — kwartierlijks
-    "afrr_volume":       "ods086",   # aFRR geactiveerd volume up/down
-    "mfrr_volume":       "ods088",   # mFRR geactiveerd volume
-    "total_load":        "ods001",   # Totale belasting (gemeten + voorspeld)
-    "calc_imbalance":    "ods023",   # Berekende onbalanstarieven (T-1)
-}
+try:
+    from elia import elia as _elia_lib
+    ELIA_LIB_AVAILABLE = True
+except ImportError:
+    ELIA_LIB_AVAILABLE = False
 
 
 class EliaClient:
     """
-    Client voor Elia Open Data Platform.
-    Geen API key vereist — publieke open data.
+    Wrapper rond elia-py voor EMS-relevante Elia Open Data.
+    Geen API key nodig. Vereist: pip install elia-py
     """
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent":  "EnergyEMS-Belgium/1.0",
-            "Accept":      "application/json",
-        })
+        if not ELIA_LIB_AVAILABLE:
+            raise ImportError(
+                "elia-py niet geïnstalleerd. Run: pip install elia-py\n"
+                "Voeg 'elia-py>=0.3.1' toe aan requirements.txt"
+            )
+        self._c = _elia_lib.EliaPandasClient()
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Core request helper
-    # ─────────────────────────────────────────────────────────────────────────
-    def _get_records(
-        self,
-        dataset_id: str,
-        start: datetime,
-        end:   datetime,
-        limit: int = 500,
-        datetime_field: str = "datetime",
-    ) -> list[dict]:
-        """Fetch all records for a dataset between start and end."""
-        url    = f"{BASE_URL}/{dataset_id}/records"
-        where  = (
-            f'{datetime_field} >= "{start.strftime("%Y-%m-%dT%H:%M:%S")}" '
-            f'AND {datetime_field} < "{end.strftime("%Y-%m-%dT%H:%M:%S")}"'
-        )
-        params = {
-            "where":    where,
-            "order_by": f"{datetime_field} asc",
-            "limit":    limit,
-            "timezone": "Europe/Brussels",
-        }
+    def get_realtime_imbalance(self) -> pd.DataFrame:
+        """Near real-time imbalance (ods162) — huidige dag, kwartierlijks."""
+        df = self._c.get_near_real_time_imbalance_prices_per_quarter_hour()
+        return self._standardize(df)
 
-        all_records = []
-        offset      = 0
-
-        for _ in range(20):  # max 20 pages (10 000 records)
-            params["offset"] = offset
-            for attempt in range(3):
-                try:
-                    r = self.session.get(url, params=params, timeout=20)
-                    r.raise_for_status()
-                    break
-                except requests.RequestException:
-                    if attempt == 2:
-                        raise
-                    time.sleep(1)
-
-            batch = r.json().get("results", [])
-            if not batch:
-                break
-            all_records.extend(batch)
-            if len(batch) < limit:
-                break
-            offset += limit
-
-        return all_records
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 1. Imbalance prijzen (MIP / MDP)  ← meest relevant voor EMS
-    # ─────────────────────────────────────────────────────────────────────────
     def get_imbalance_prices(
         self,
-        start: date | datetime,
-        end:   date | datetime,
+        start: dt.date | dt.datetime,
+        end:   dt.date | dt.datetime,
     ) -> pd.DataFrame:
         """
-        Kwartier-imbalans-tarieven.
-
-        Kolommen: datetime, nrv_mw, si_mw, mip_eur_mwh, mdp_eur_mwh,
-                  alpha, cip_eur_mwh, cdp_eur_mwh
-
-        Interpretatie:
-          nrv_mw  > 0 → grid is short (ontladen waardevol)
-          nrv_mw  < 0 → grid is long  (laden wordt betaald)
-          mip     = prijs voor upward regulation (ontladen / leveren)
-          mdp     = prijs voor downward regulation (laden / absorberen)
-          alpha   = 1.0 of 0.85 (imbalance-verrekenings-coëfficiënt)
+        Historische imbalance prijzen per kwartier.
+        Automatisch routing: ods134 (na MARI 22/05/2024) of ods047 (voor MARI).
+        Grote bereiken worden automatisch opgesplitst in 5-daagse chunks.
         """
-        start_dt = _to_dt(start, start_of_day=True)
-        end_dt   = _to_dt(end,   start_of_day=False)
+        start_dt  = _to_dt(start)
+        end_dt    = _to_dt(end)
+        MARI      = dt.datetime(2024, 5, 22)
+        parts     = []
 
-        records = self._get_records(DATASETS["imbalance_prices"], start_dt, end_dt)
-
-        if not records:
-            return _empty_imbalance_df()
-
-        rows = []
-        for rec in records:
+        if start_dt < MARI:
             try:
-                dt = datetime.fromisoformat(
-                    (rec.get("datetime") or rec.get("timestamp", "")).replace("Z", "+00:00")
-                )
-                rows.append({
-                    "datetime":    dt,
-                    "nrv_mw":      _f(rec, "nrv"),
-                    "si_mw":       _f(rec, "si"),
-                    "mip_eur_mwh": _f(rec, "mip"),
-                    "mdp_eur_mwh": _f(rec, "mdp"),
-                    "alpha":       _f(rec, "alpha", default=1.0),
-                    "cip_eur_mwh": _f(rec, "cip"),
-                    "cdp_eur_mwh": _f(rec, "cdp"),
-                })
-            except (ValueError, KeyError):
-                continue
+                df_pre = self._c.get_historical_imbalance_prices_per_quarter_hour_before_mari(
+                    start=start_dt, end=min(end_dt, MARI))
+                parts.append(self._standardize(df_pre))
+            except Exception as e:
+                print(f"[Elia] ods047 fout: {e}")
 
-        df = pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
-        return df
+        if end_dt > MARI:
+            try:
+                df_post = self._c.get_historical_imbalance_prices_per_quarter_hour(
+                    start=max(start_dt, MARI), end=end_dt)
+                parts.append(self._standardize(df_post))
+            except Exception as e:
+                print(f"[Elia] ods134 fout: {e}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # 2. Laatste kwartier imbalance (real-time dashboard tile)
-    # ─────────────────────────────────────────────────────────────────────────
+        if not parts:
+            return _empty_df()
+        return (pd.concat(parts)
+                  .sort_values("datetime")
+                  .drop_duplicates("datetime")
+                  .reset_index(drop=True))
+
     def get_latest_imbalance(self) -> Dict[str, Any]:
-        """Meest recente kwartier-imbalans-snapshot voor live dashboard tile."""
-        end   = datetime.utcnow() + timedelta(hours=1)
-        start = end - timedelta(hours=3)
-        df    = self.get_imbalance_prices(start.date(), end.date())
-
+        """Meest recente kwartier snapshot voor live dashboard tile."""
+        try:
+            df = self.get_realtime_imbalance()
+        except Exception as e:
+            return {"status": f"Fout: {e}", "nrv_mw": None}
         if df.empty:
-            return {"status": "Geen data", "nrv_mw": None}
+            return {"status": "Geen data (ods162 leeg)", "nrv_mw": None}
 
-        latest = df.iloc[-1]
-        grid_state = "⚡ SHORT (ontladen = winstgevend)" if (latest["nrv_mw"] or 0) > 0 \
-                else "🌊 LONG (laden wordt betaald)"
+        r   = df.iloc[-1]
+        nrv = float(r.get("nrv_mw", 0) or 0)
+        mip = r.get("mip_eur_mwh")
+        mdp = r.get("mdp_eur_mwh")
+        grid = ("⚡ SHORT (ontladen = winstgevend)" if nrv > 50
+                else "🌊 LONG (laden wordt betaald)" if nrv < -50
+                else "⚖️  Gebalanceerd")
 
         return {
-            "datetime":    str(latest["datetime"]),
-            "nrv_mw":      latest["nrv_mw"],
-            "si_mw":       latest["si_mw"],
-            "mip_eur_mwh": latest["mip_eur_mwh"],
-            "mdp_eur_mwh": latest["mdp_eur_mwh"],
-            "alpha":        latest["alpha"],
-            "grid_state":  grid_state,
+            "datetime":    str(r.get("datetime", "—")),
+            "nrv_mw":      round(nrv, 1),
+            "si_mw":       round(float(r.get("si_mw", 0) or 0), 1),
+            "mip_eur_mwh": round(float(mip), 2) if mip is not None else None,
+            "mdp_eur_mwh": round(float(mdp), 2) if mdp is not None else None,
+            "grid_state":  grid,
+            "status":      "OK",
         }
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # 3. aFRR geactiveerde volumes
-    # ─────────────────────────────────────────────────────────────────────────
-    def get_afrr_volumes(
-        self,
-        start: date | datetime,
-        end:   date | datetime,
-    ) -> pd.DataFrame:
-        """
-        aFRR (automatic Frequency Restoration Reserve) geactiveerde volumes.
-
-        Kolommen: datetime, afrr_up_mw, afrr_down_mw
-        Hoge aFRR-up activatie → ontladen batterij via aggregator (Yuso) is winstgevend.
-        """
-        start_dt = _to_dt(start, start_of_day=True)
-        end_dt   = _to_dt(end,   start_of_day=False)
-
-        records = self._get_records(DATASETS["afrr_volume"], start_dt, end_dt)
-
-        if not records:
-            return pd.DataFrame(columns=["datetime", "afrr_up_mw", "afrr_down_mw"])
-
-        rows = []
-        for rec in records:
+    def get_ems_intelligence(self, target_date: dt.date) -> Dict[str, Any]:
+        """EMS-advies dict voor één dag (combineert imbalance data)."""
+        if target_date >= dt.date.today():
             try:
-                dt = datetime.fromisoformat(
-                    (rec.get("datetime") or "").replace("Z", "+00:00")
-                )
-                rows.append({
-                    "datetime":    dt,
-                    "afrr_up_mw":  _f(rec, "afrrup") or _f(rec, "upward") or _f(rec, "up"),
-                    "afrr_down_mw":_f(rec, "afrrdown") or _f(rec, "downward") or _f(rec, "down"),
-                })
-            except (ValueError, KeyError):
-                continue
+                df = self.get_realtime_imbalance()
+            except Exception:
+                df = pd.DataFrame()
+        else:
+            df = self.get_imbalance_prices(target_date, target_date + dt.timedelta(days=1))
 
-        return pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
+        if df.empty:
+            return {"status": "Geen Elia data", "tip": "Controleer verbinding met opendata.elia.be"}
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # 4. Totale belasting Belgium (load profile)
-    # ─────────────────────────────────────────────────────────────────────────
-    def get_total_load(
-        self,
-        start: date | datetime,
-        end:   date | datetime,
-    ) -> pd.DataFrame:
-        """Totale belasting (MW) — handig voor demand-response correlatie."""
-        start_dt = _to_dt(start, start_of_day=True)
-        end_dt   = _to_dt(end,   start_of_day=False)
-        records  = self._get_records(DATASETS["total_load"], start_dt, end_dt,
-                                     datetime_field="datetime")
+        def _col(df, name):
+            if name in df.columns:
+                return df[name]
+            hits = [c for c in df.columns if name.split("_")[0] in c.lower()]
+            return df[hits[0]] if hits else pd.Series(dtype=float)
 
-        if not records:
-            return pd.DataFrame(columns=["datetime", "load_mw"])
-
-        rows = []
-        for rec in records:
-            try:
-                dt = datetime.fromisoformat(
-                    (rec.get("datetime") or "").replace("Z", "+00:00")
-                )
-                load = _f(rec, "totalload") or _f(rec, "load") or _f(rec, "eliameasured")
-                rows.append({"datetime": dt, "load_mw": load})
-            except (ValueError, KeyError):
-                continue
-
-        return pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 5. Gecombineerde EMS-intelligentie voor één dag
-    # ─────────────────────────────────────────────────────────────────────────
-    def get_ems_intelligence(self, target_date: date) -> Dict[str, Any]:
-        """
-        Combineert imbalance + aFRR data voor één dag tot een EMS-advies dict.
-        Handig voor dashboard tiles.
-        """
-        end   = target_date + timedelta(days=1)
-        df_imb = self.get_imbalance_prices(target_date, end)
-
-        if df_imb.empty:
-            return {"status": "Geen Elia data beschikbaar",
-                    "tip": "Controleer de Elia Open Data verbinding."}
-
-        nrv_pos   = df_imb[df_imb["nrv_mw"] > 50]   # grid short >50 MW
-        nrv_neg   = df_imb[df_imb["nrv_mw"] < -50]  # grid long  >50 MW
-        avg_mip   = df_imb["mip_eur_mwh"].mean()
-        avg_mdp   = df_imb["mdp_eur_mwh"].mean()
-        peak_mip  = df_imb["mip_eur_mwh"].max()
+        nrv = _col(df, "nrv_mw")
+        mip = _col(df, "mip_eur_mwh")
+        mdp = _col(df, "mdp_eur_mwh")
 
         return {
             "date":               str(target_date),
-            "quarters_analyzed":  len(df_imb),
-            "grid_short_qtrs":    len(nrv_pos),
-            "grid_long_qtrs":     len(nrv_neg),
-            "avg_mip_eur_mwh":    round(avg_mip,  2) if avg_mip  else None,
-            "avg_mdp_eur_mwh":    round(avg_mdp,  2) if avg_mdp  else None,
-            "peak_mip_eur_mwh":   round(peak_mip, 2) if peak_mip else None,
-            "discharge_opportunity": len(nrv_pos) > 8,
-            "charge_opportunity":    len(nrv_neg) > 8,
+            "quarters_analyzed":  len(df),
+            "grid_short_qtrs":    int((nrv > 50).sum()),
+            "grid_long_qtrs":     int((nrv < -50).sum()),
+            "avg_mip_eur_mwh":    round(float(mip.mean()), 2) if not mip.empty else None,
+            "avg_mdp_eur_mwh":    round(float(mdp.mean()), 2) if not mdp.empty else None,
+            "peak_mip_eur_mwh":   round(float(mip.max()),  2) if not mip.empty else None,
+            "discharge_opportunity": bool(int((nrv > 50).sum()) > 8),
+            "charge_opportunity":    bool(int((nrv < -50).sum()) > 8),
             "status": "OK",
         }
 
+    def _standardize(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normaliseer ruwe Elia DataFrame naar consistente EMS kolomnamen."""
+        if df.empty:
+            return _empty_df()
+        if df.index.name == "datetime" or isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def _to_dt(d: date | datetime, start_of_day: bool = True) -> datetime:
-    if isinstance(d, datetime):
-        return d
-    if start_of_day:
-        return datetime(d.year, d.month, d.day, 0, 0, 0)
-    return datetime(d.year, d.month, d.day, 23, 59, 59)
+        col_lower = {c.lower(): c for c in df.columns}
+        rename = {}
+        for src, dst in [("nrv","nrv_mw"),("si","si_mw"),("mip","mip_eur_mwh"),
+                         ("mdp","mdp_eur_mwh"),("alpha","alpha"),
+                         ("cip","cip_eur_mwh"),("cdp","cdp_eur_mwh")]:
+            if src in col_lower:
+                rename[col_lower[src]] = dst
+        df = df.rename(columns=rename)
+
+        if "datetime" not in df.columns:
+            time_cols = [c for c in df.columns if "time" in c.lower() or "date" in c.lower()]
+            if time_cols:
+                df = df.rename(columns={time_cols[0]: "datetime"})
+
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+
+        for col in ["nrv_mw","si_mw","mip_eur_mwh","mdp_eur_mwh",
+                    "alpha","cip_eur_mwh","cdp_eur_mwh"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return df.sort_values("datetime").reset_index(drop=True)
 
 
-def _f(rec: dict, key: str, default=None):
-    """Safely get a float from a record, trying lowercase and uppercase."""
-    val = rec.get(key) or rec.get(key.upper()) or rec.get(key.capitalize())
-    if val is None:
-        return default
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
+def _to_dt(d: dt.date | dt.datetime) -> dt.datetime:
+    return d if isinstance(d, dt.datetime) else dt.datetime(d.year, d.month, d.day)
+
+def _empty_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=["datetime","nrv_mw","si_mw","mip_eur_mwh",
+                                   "mdp_eur_mwh","alpha","cip_eur_mwh","cdp_eur_mwh"])
 
 
-def _empty_imbalance_df() -> pd.DataFrame:
-    return pd.DataFrame(columns=[
-        "datetime", "nrv_mw", "si_mw",
-        "mip_eur_mwh", "mdp_eur_mwh", "alpha",
-        "cip_eur_mwh", "cdp_eur_mwh",
-    ])
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI test
-# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     client = EliaClient()
-
-    today = date.today()
-    print(f"Elia imbalance prijzen voor {today}…")
-    df = client.get_imbalance_prices(today, today + timedelta(days=1))
-    if not df.empty:
-        print(df[["datetime", "nrv_mw", "mip_eur_mwh", "mdp_eur_mwh"]].head(12).to_string())
-        print(f"\nGemiddeld MIP: {df['mip_eur_mwh'].mean():.2f} €/MWh")
-        print(f"Gemiddeld MDP: {df['mdp_eur_mwh'].mean():.2f} €/MWh")
-    else:
-        print("Geen data beschikbaar (controleer verbinding met opendata.elia.be)")
-
-    print("\nLatest imbalance snapshot:")
+    print("Real-time snapshot:")
     snap = client.get_latest_imbalance()
-    for k, v in snap.items():
-        print(f"  {k}: {v}")
+    for k, v in snap.items(): print(f"  {k}: {v}")
+
+    print("\nHistorische imbalance (gisteren):")
+    yesterday = dt.date.today() - dt.timedelta(days=1)
+    df = client.get_imbalance_prices(yesterday, dt.date.today())
+    if not df.empty:
+        print(f"  {len(df)} kwartieren | kolommen: {list(df.columns)}")
+        print(df[["datetime","nrv_mw","mip_eur_mwh","mdp_eur_mwh"]].head(4).to_string())
+    else:
+        print("  Geen data")

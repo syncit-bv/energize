@@ -3,7 +3,5 @@ pandas>=2.0
 plotly>=5.20
 pulp>=2.7
 requests>=2.31
-# Optional but recommended for full backtester
-# matplotlib
-# pyarrow
-# Test comment - connector write test
+elia-py>=0.3.1
+pyarrow>=14.0
