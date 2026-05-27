@@ -1110,6 +1110,13 @@ if milp_ready:
 # ─────────────────────────────────────────────────────────────────────────────
 # Scenario vergelijking (4 scenario's: Rule-based | MILP basis | +DA | +Solar)
 # ─────────────────────────────────────────────────────────────────────────────
+def _safe_float(val) -> float:
+    """Haal numeriek deel op uit strings zoals '13.32 (+5.20€ gepland morgen...)'."""
+    try:
+        return float(str(val).split(" ")[0])
+    except (ValueError, TypeError):
+        return 0.0
+
 if st.session_state.get("scenarios"):
     st.markdown("---")
     st.subheader("🔬 Scenario Vergelijking — De Kracht van EMS Optimalisatie")
@@ -1207,9 +1214,10 @@ if st.session_state.get("scenarios"):
     )
 
     fig_bar = go.Figure(go.Bar(
-        x=bar_labels, y=bar_values,
-        marker_color=bar_colors[:len(bar_labels)],
-        text=[f"{v:.2f} €" for v in bar_values],
+        x=[r["Scenario"] for r in rows],
+        y=[_safe_float(r["Net Revenue (€)"]) for r in rows],
+        marker_color=["royalblue", "#E67E22", "#27AE60", "#8E44AD"][:len(rows)],
+        text=[f"{_safe_float(r['Net Revenue (€)']):.2f} €" for r in rows],
         textposition="outside",
     ))
     fig_bar.update_layout(
