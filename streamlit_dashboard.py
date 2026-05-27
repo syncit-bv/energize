@@ -153,7 +153,31 @@ st.markdown(
 # ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("🔋 Batterij & Strategie")
 battery_kwh      = st.sidebar.slider("Capaciteit (kWh)", 5.0, 30.0, 10.0, 0.5)
-max_power_kw     = st.sidebar.slider("Max vermogen (kW)", 2.0, 11.0, 5.0, 0.5)
+
+# Asymmetrisch vermogen: ontladen en laden onafhankelijk instelbaar
+discharge_power_kw = st.sidebar.slider(
+    "Max ontlaadvermogen / injectie (kW)", 2.0, 11.0, 5.0, 0.5,
+    help="Maximaal vermogen bij injectie op het net. Geen capaciteitstarief van toepassing."
+)
+charge_power_kw = st.sidebar.slider(
+    "Max laadvermogen / afname (kW)", 1.0, 11.0, 2.5, 0.5,
+    help="Maximaal afnamevermogen van het net. Bepaalt het capaciteitstarief (Fluvius)."
+)
+# Backwards-compat: max_power_kw = discharge (gebruikt in rule-based + MILP)
+max_power_kw = discharge_power_kw
+
+# Capaciteitstarief berekening
+cap_peak_kw    = max(2.5, charge_power_kw)   # MILP kan hoger gaan maar dit is de user-instelling
+cap_monthly    = cap_peak_kw * 60 / 12       # €/maand bij deze piek
+cap_forfait    = 2.5 * 60 / 12               # €12.50/maand minimumforfait
+cap_extra      = cap_monthly - cap_forfait   # extra boven forfait
+
+st.sidebar.info(
+    f"⚡ **Capaciteitstarief**: {cap_peak_kw:.1f} kW piek "
+    f"→ **{cap_monthly:.2f} €/mnd**"
+    + (f" (+{cap_extra:.2f} € vs forfait)" if cap_extra > 0.01 else " (= forfait minimum)")
+)
+
 charge_thresh    = st.sidebar.slider("Laden onder (€/MWh)", 0, 80, 50)
 discharge_thresh = st.sidebar.slider("Ontladen boven (€/MWh)", 100, 250, 160)
 negative_boost   = st.sidebar.checkbox("Agressief laden bij negatieve prijs", value=True)
@@ -162,36 +186,35 @@ min_end_soc_pct  = st.sidebar.slider("Min End-SOC (%)", 10, 50, 20, 5,
     help="Min SOC op het einde van de horizon. Bij multi-dag MILP is dit het einde van de laatste dag.")
 
 # ── Batterij specs & validatie — direct onder de SOC sliders ─────────────────
-ETA         = 0.92 ** 0.5
-max_e_slot  = max_power_kw * 0.25
-c_rate_ch   = (ETA * max_e_slot * 4) / battery_kwh
-c_rate_dis  = (max_e_slot / ETA * 4) / battery_kwh
-usable_kwh      = battery_kwh * (1 - min_soc_pct / 100)
-t_charge_min    = (usable_kwh / (ETA * max_e_slot)) * 15
-t_discharge_min = (usable_kwh / (max_e_slot / ETA)) * 15
+ETA              = 0.92 ** 0.5
+max_e_slot_ch    = charge_power_kw    * 0.25   # max kWh laden per slot
+max_e_slot_dis   = discharge_power_kw * 0.25   # max kWh ontladen per slot
+c_rate_ch        = (ETA * max_e_slot_ch  * 4) / battery_kwh
+c_rate_dis       = (max_e_slot_dis / ETA * 4) / battery_kwh
+usable_kwh       = battery_kwh * (1 - min_soc_pct / 100)
+t_charge_min     = (usable_kwh / (ETA * max_e_slot_ch))  * 15
+t_discharge_min  = (usable_kwh / (max_e_slot_dis / ETA)) * 15
 
 with st.sidebar.expander("🔬 Batterij specs & validatie", expanded=True):
     s1, s2 = st.columns(2)
-    s1.metric("Max. per slot", f"{max_e_slot:.2f} kWh",
-              help="Maximale energie per 15 min (AC-zijde omvormer)")
-    s2.metric("C-rate laden",  f"{c_rate_ch:.2f} C",
-              help="Laadsnelheid t.o.v. batterijcapaciteit. >1C verhoogt slijtage.")
+    s1.metric("Laden/slot",    f"{max_e_slot_ch:.2f} kWh",
+              help="Max kWh per 15 min van het net (capaciteitstarief-zijde)")
+    s2.metric("Ontladen/slot", f"{max_e_slot_dis:.2f} kWh",
+              help="Max kWh per 15 min naar het net (geen capaciteitstarief)")
     s3, s4 = st.columns(2)
     s3.metric("Vol laden",    f"{t_charge_min:.0f} min",
-              help=f"Van {min_soc_pct}% naar 100% bij max vermogen")
+              help=f"Van {min_soc_pct}% naar 100% bij {charge_power_kw} kW")
     s4.metric("Vol ontladen", f"{t_discharge_min:.0f} min",
-              help=f"Van 100% naar {min_soc_pct}% bij max vermogen")
+              help=f"Van 100% naar {min_soc_pct}% bij {discharge_power_kw} kW")
+    asym = discharge_power_kw / charge_power_kw
+    st.success(f"⚡ Ontladen is **{asym:.1f}× sneller** dan laden — asymmetrie actief")
     max_c = max(c_rate_ch, c_rate_dis)
     if max_c > 2.0:
-        st.error(f"⚠️ C-rate = {max_c:.1f}C — ZEER HOOG. Max vermogen verlagen of capaciteit verhogen.")
+        st.error(f"⚠️ C-rate = {max_c:.1f}C — ZEER HOOG.")
     elif max_c > 1.0:
-        st.warning(f"⚠️ C-rate = {max_c:.1f}C — boven 1C. Controleer batterijspecificaties.")
+        st.warning(f"⚠️ C-rate = {max_c:.1f}C — boven 1C.")
     else:
-        st.success(f"✅ C-rate = {max_c:.2f}C — Binnen veilig bereik (≤ 1C)")
-    st.caption(
-        f"ℹ️ **max_power_kw** = AC-vermogen aan netzijde. "
-        f"Batterij laadt op {ETA*100:.0f}% ({ETA*max_power_kw:.2f} kW)."
-    )
+        st.success(f"✅ C-rate laden = {c_rate_ch:.2f}C | ontladen = {c_rate_dis:.2f}C")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 MILP Optimalisatie")
@@ -677,12 +700,13 @@ if st.session_state.milp_pending:
             milp_schedule, milp_summary = optimize_battery_schedule(
                 milp_input,
                 battery_kwh=battery_kwh,
-                max_power_kw=max_power_kw,
+                max_power_kw=discharge_power_kw,
+                charge_power_kw=charge_power_kw,
                 min_soc=min_soc_pct / 100,
                 min_end_soc=min_end_soc_pct / 100,
                 initial_soc=st.session_state.get("milp_initial_soc", 0.50),
                 time_horizon_hours=None,
-                execute_until=sel_end,   # rolling horizon: morgen = lookahead
+                execute_until=sel_end,
             )
             milp_summary["horizon_label"]   = horizon_label
             milp_summary["is_multiday"]     = da_published and tomorrow_in_df
@@ -708,9 +732,13 @@ if st.session_state.milp_pending:
 if st.session_state.get("scenarios_pending"):
     init_soc   = st.session_state.get("milp_initial_soc", 0.50)
     milp_args  = dict(
-        battery_kwh=battery_kwh, max_power_kw=max_power_kw,
-        min_soc=min_soc_pct / 100, min_end_soc=min_end_soc_pct / 100,
-        initial_soc=init_soc, time_horizon_hours=None,
+        battery_kwh=battery_kwh,
+        max_power_kw=discharge_power_kw,
+        charge_power_kw=charge_power_kw,
+        min_soc=min_soc_pct / 100,
+        min_end_soc=min_end_soc_pct / 100,
+        initial_soc=init_soc,
+        time_horizon_hours=None,
     )
 
     # ── Bouw day-ahead input ───────────────────────────────────────────────
@@ -1030,21 +1058,44 @@ if milp_ready:
     cost_p  = abs(pos_ch["net_revenue_eur"].sum())
     inc_neg = abs(neg_ch["net_revenue_eur"].sum())
     inc_dis = dis_df["net_revenue_eur"].sum()
-    net_rev = milp_summ.get("revenue_execute_eur", milp_summ.get("total_net_revenue_eur", 0))
-    # Verifieer consistentie: componenten moeten optellen tot net_rev
-    computed = inc_dis + inc_neg - cost_p
+    net_rev      = milp_summ.get("revenue_execute_eur", milp_summ.get("total_net_revenue_eur", 0))
+    net_after_cap= milp_summ.get("revenue_after_cap_eur", net_rev)
+    cap_cost     = milp_summ.get("cap_tarief_period_eur", 0)
+    peak_kw      = milp_summ.get("peak_charge_kw", charge_power_kw)
+    cap_monthly  = milp_summ.get("cap_tarief_monthly_eur", peak_kw * 60 / 12)
+
     f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Net Revenue (MILP)", f"{net_rev:.2f} €",
-              delta=f"{net_rev - sim['cum_rev'].iloc[-1]:+.2f} vs Rule-based")
-    f2.metric("Kosten (laden, p>0)",  f"-{cost_p:.2f} €",  delta_color="inverse",
-              help="Betaald voor laden van het net bij positieve prijs")
-    f3.metric("Inkomsten (p≤0)",      f"+{inc_neg:.2f} €",
+    f1.metric("Ontlaad-inkomsten",   f"+{inc_dis:.2f} €",
+              help="Verdiend door ontladen bij hoge prijs (5 kW injectie)")
+    f2.metric("Inkomsten (p≤0)",     f"+{inc_neg:.2f} €",
               help="Ontvangen voor laden bij negatieve/nulprijs")
-    f4.metric("Ontlaad-inkomsten",    f"+{inc_dis:.2f} €",
-              help="Verdiend door ontladen bij hoge prijs")
-    if abs(computed - net_rev) > 0.02:
-        st.caption(f"ℹ️ Check: {inc_dis:.2f} + {inc_neg:.2f} - {cost_p:.2f} = {computed:.2f} € "
-                   f"(net_rev = {net_rev:.2f} €, Δ={computed-net_rev:+.2f} € door afrondingen)")
+    f3.metric("Kosten (laden, p>0)", f"-{cost_p:.2f} €",
+              delta_color="inverse",
+              help="Betaald voor laden van het net bij positieve prijs")
+    f4.metric("Capaciteitstarief",   f"-{cap_cost:.2f} €",
+              delta_color="inverse",
+              help=f"MILP koos piek {peak_kw:.2f} kW → {cap_monthly:.2f} €/mnd equivalent")
+
+    # Net revenue rij
+    rev_col1, rev_col2 = st.columns(2)
+    rev_col1.metric(
+        "Net Revenue (voor cap.tarief)",
+        f"{net_rev:.2f} €",
+        delta=f"{net_rev - sim['cum_rev'].iloc[-1]:+.2f} vs Rule-based"
+    )
+    rev_col2.metric(
+        "Net Revenue (na cap.tarief)",
+        f"{net_after_cap:.2f} €",
+        delta=f"-{cap_cost:.2f} € cap.tarief ({peak_kw:.1f} kW piek)",
+        delta_color="inverse",
+        help=f"MILP koos laadpiek = {peak_kw:.2f} kW (max toegestaan: {charge_power_kw} kW). "
+             f"Ontlaadvermogen: {discharge_power_kw} kW. "
+             f"Capaciteitstarief maandequivalent: {cap_monthly:.2f} €/mnd."
+    )
+    computed = inc_dis + inc_neg - cost_p - cap_cost
+    if abs(computed - net_after_cap) > 0.05:
+        st.caption(f"ℹ️ Check: {inc_dis:.2f} + {inc_neg:.2f} - {cost_p:.2f} - {cap_cost:.2f} "
+                   f"= {computed:.2f} € (Δ={computed-net_after_cap:+.2f} €)")
 
     # Comparison table
     st.markdown("#### 📊 Vergelijking (geselecteerde periode)")
