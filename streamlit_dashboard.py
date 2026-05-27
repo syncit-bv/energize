@@ -188,7 +188,7 @@ def compute_yesterday_optimal_soc(
 
 # Bepaal de beste start-SOC suggestie
 yesterday_soc   = None
-prev_final_soc  = st.session_state.get("milp_summary", {}).get("final_soc_pct")
+prev_final_soc  = (st.session_state.get("milp_summary") or {}).get("final_soc_pct")
 
 # Bereken gisteren's optimale SOC (gecached, snel)
 if not st.session_state.get("df_prices", pd.DataFrame()).empty:
@@ -393,11 +393,19 @@ def load_parquet():
 
 if "df_prices" not in st.session_state:
     st.session_state.df_prices = load_parquet()
-if "milp_pending"       not in st.session_state: st.session_state.milp_pending       = False
-if "scenarios_pending"  not in st.session_state: st.session_state.scenarios_pending  = False
-if "scenarios"          not in st.session_state: st.session_state.scenarios          = {}
-if "milp_schedule" not in st.session_state: st.session_state.milp_schedule = None
-if "milp_summary"  not in st.session_state: st.session_state.milp_summary  = None
+
+_ss_defaults = {
+    "milp_pending":       False,
+    "scenarios_pending":  False,
+    "milp_schedule":      None,
+    "milp_summary":       None,
+    "milp_initial_soc":   0.50,
+    "scenarios":          {},
+    "scenario_errors":    {},
+}
+for _k, _v in _ss_defaults.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 df = st.session_state.df_prices
 
@@ -825,9 +833,9 @@ sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh,
                      discharge_thresh, negative_boost, min_soc_pct / 100,
                      initial_soc_pct / 100)
 
-milp_df   = st.session_state.milp_schedule
-milp_summ = st.session_state.milp_summary
-milp_ready = milp_df is not None
+milp_df    = st.session_state.get("milp_schedule")
+milp_summ  = st.session_state.get("milp_summary") or {}
+milp_ready = milp_df is not None and bool(milp_summ)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KPI row
