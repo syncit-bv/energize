@@ -58,11 +58,28 @@ def fdate(d: date) -> str:
     return f"{d.day} {NL_MONTHS[d.month]}"
 
 def now_cet() -> datetime:
-    """Current time in CET/CEST (UTC+1/+2). Simple offset from UTC."""
-    import time as _t
-    utc_offset = -(_t.timezone if not _t.daylight else _t.altzone)
-    # Streamlit usually runs local; just use local time
-    return datetime.now()
+    """
+    Huidige tijd in Europe/Brussels (CET=UTC+1 winter, CEST=UTC+2 zomer).
+    Streamlit Cloud en veel servers draaien op UTC — altijd UTC+offset berekenen.
+    """
+    try:
+        # Beste aanpak: gebruik zoneinfo (Python 3.9+) of pytz
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo("Europe/Brussels")).replace(tzinfo=None)
+        except ImportError:
+            import pytz
+            return datetime.now(pytz.timezone("Europe/Brussels")).replace(tzinfo=None)
+    except Exception:
+        # Noodoplossing: UTC + 2u (CEST zomer), werkt voor België april–oktober
+        from datetime import timezone, timedelta
+        utc_now = datetime.now(timezone.utc)
+        # Eenvoudige DST-schatting: CEST (UTC+2) van laatste zondag maart t/m laatste zondag okt
+        month = utc_now.month
+        offset = 2 if 3 < month < 11 else (
+                 2 if month == 3 and utc_now.day >= 25 else (
+                 1 if month == 10 and utc_now.day < 25 else 1))
+        return (utc_now + timedelta(hours=offset)).replace(tzinfo=None)
 
 def day_ahead_published() -> bool:
     """Day-ahead prices for D+1 are published around 12:30-13:00 CET."""
@@ -103,23 +120,89 @@ min_end_soc_pct  = st.sidebar.slider("Min End-SOC (%)", 10, 50, 20, 5,
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚀 MILP Optimalisatie")
 
-# Initial SOC — auto-suggest previous run's end SOC
-prev_final_soc = None
-if st.session_state.get("milp_summary"):
-    prev_final_soc = st.session_state.milp_summary.get("final_soc_pct")
+# ── Initiële SOC: 3 bronnen in volgorde van prioriteit ────────────────────────
+# 1. Gisteren's MILP eindSOC (meest nauwkeurig — perfecte foresight op historische prijzen)
+# 2. Vorige run's eindSOC (handig bij aaneengesloten periodes)
+# 3. Manuele slider
 
-if prev_final_soc is not None:
-    st.sidebar.caption(f"💡 Vorige run eindigde op **{prev_final_soc:.1f}%** SOC")
-    use_prev = st.sidebar.checkbox(
-        f"Start op {prev_final_soc:.1f}% (vorige run)", value=True, key="use_prev_soc"
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_yesterday_optimal_soc(
+    prices_parquet_hash: str,  # cache-key: verandert als data wijzigt
+    battery_kwh: float,
+    max_power_kw: float,
+    min_soc: float,
+    min_end_soc: float,
+) -> float | None:
+    """
+    Bereken de optimale eindSOC van gisteren via MILP (perfecte foresight).
+    Wordt gecached zodat het slechts 1x per uur herberekend wordt.
+    Geeft None terug als er geen gisterse data beschikbaar is.
+    """
+    try:
+        from milp_optimizer import optimize_battery_schedule
+        yesterday = date.today() - timedelta(days=1)
+        df_all = st.session_state.get("df_prices", pd.DataFrame())
+        if df_all.empty:
+            return None
+        df_yest = df_all[df_all["datetime"].dt.date == yesterday].copy()
+        if len(df_yest) < 4:
+            return None
+        _, summ = optimize_battery_schedule(
+            df_yest,
+            battery_kwh=battery_kwh,
+            max_power_kw=max_power_kw,
+            min_soc=min_soc,
+            min_end_soc=min_end_soc,
+            initial_soc=0.50,          # neutraal startpunt voor gisteren
+            time_horizon_hours=None,
+        )
+        return summ["final_soc_pct"] if summ["status"] == "Optimal" else None
+    except Exception:
+        return None
+
+# Bepaal de beste start-SOC suggestie
+yesterday_soc   = None
+prev_final_soc  = st.session_state.get("milp_summary", {}).get("final_soc_pct")
+
+# Bereken gisteren's optimale SOC (gecached, snel)
+if not st.session_state.get("df_prices", pd.DataFrame()).empty:
+    try:
+        _hash = str(len(st.session_state.df_prices))  # simpele cache-key
+        yesterday_soc = compute_yesterday_optimal_soc(
+            _hash,
+            battery_kwh, max_power_kw,
+            min_soc_pct / 100, min_end_soc_pct / 100,
+        )
+    except Exception:
+        yesterday_soc = None
+
+# Toon de beschikbare SOC-bronnen
+if yesterday_soc is not None:
+    st.sidebar.success(
+        f"📊 **Gisteren's optimale eindSOC: {yesterday_soc:.1f}%**\n\n"
+        f"MILP berekende dit op basis van alle prijzen van gisteren "
+        f"(perfecte foresight). Gebruik dit als startpunt voor vandaag."
     )
-    default_initial = prev_final_soc / 100 if use_prev else 0.50
+    default_initial = yesterday_soc / 100
+    soc_source = f"Gisteren optimaal ({yesterday_soc:.1f}%)"
+elif prev_final_soc is not None:
+    st.sidebar.caption(f"💡 Vorige run eindigde op **{prev_final_soc:.1f}%** SOC")
+    default_initial = prev_final_soc / 100
+    soc_source = f"Vorige run ({prev_final_soc:.1f}%)"
 else:
     default_initial = 0.50
+    soc_source = "Standaard (50%)"
 
 initial_soc_pct = st.sidebar.slider(
     "Start SOC (%)", 10, 100, int(default_initial * 100), 5,
-    help="Werkelijke batterij-SOC nu. In productie: uitlezen uit BMS."
+    help=(
+        f"Huidige bron: {soc_source}\n\n"
+        "Volgorde van prioriteit:\n"
+        "1. Gisteren's optimale eindSOC (MILP op historische prijzen)\n"
+        "2. Vorige run's eindSOC\n"
+        "3. Manuele waarde\n\n"
+        "In productie: vervang door live BMS-uitlezing."
+    )
 )
 
 own_kwp = st.sidebar.slider(
