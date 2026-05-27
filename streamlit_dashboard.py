@@ -141,7 +141,55 @@ if st.sidebar.button("🔬 Vergelijk alle scenario's", type="secondary", use_con
     st.session_state.scenarios         = {}
     st.session_state.milp_initial_soc  = initial_soc_pct / 100
 
-st.sidebar.metric("Max energie/slot (15 min)", f"{max_power_kw * 0.25:.2f} kWh")
+st.sidebar.markdown("---")
+
+# ── Batterij parameter validatie ──────────────────────────────────────────────
+ETA         = 0.92 ** 0.5          # ≈ 0.9592 — efficiency per richting
+max_e_slot  = max_power_kw * 0.25  # kWh van/aan net per 15-min slot
+c_rate_ch   = (ETA * max_e_slot * 4) / battery_kwh   # per uur → C-getal
+c_rate_dis  = (max_e_slot / ETA * 4) / battery_kwh
+
+# Laad- en ontlaadtijden (van leeg naar vol, en vice versa)
+usable_kwh      = battery_kwh * (1 - min_soc_pct / 100)
+t_charge_min    = (usable_kwh / (ETA * max_e_slot)) * 15    # minuten
+t_discharge_min = (usable_kwh / (max_e_slot / ETA)) * 15
+
+with st.sidebar.expander("🔬 Batterij specs & validatie", expanded=True):
+    s1, s2 = st.columns(2)
+    s1.metric("Max. per slot", f"{max_e_slot:.2f} kWh",
+              help="Maximale energie die per 15 min van/aan het net kan worden uitgewisseld (AC-zijde omvormer)")
+    s2.metric("C-rate laden",  f"{c_rate_ch:.2f} C",
+              help="Laadsnelheid t.o.v. batterijcapaciteit. >1C verhoogt slijtage.")
+
+    s3, s4 = st.columns(2)
+    s3.metric("Vol laden",     f"{t_charge_min:.0f} min",
+              help=f"Volledig laden van {min_soc_pct}% naar 100% bij max vermogen")
+    s4.metric("Vol ontladen",  f"{t_discharge_min:.0f} min",
+              help=f"Volledig ontladen van 100% naar {min_soc_pct}% bij max vermogen")
+
+    # C-rate waarschuwingen
+    max_c = max(c_rate_ch, c_rate_dis)
+    if max_c > 2.0:
+        st.error(
+            f"⚠️ **C-rate = {max_c:.1f}C** — Dit is ZEER HOOG voor de meeste lithium-batterijen. "
+            f"Verlaag het max vermogen of verhoog de capaciteit. "
+            f"Aanbevolen: max_power_kw ≤ {battery_kwh * 1.0:.0f} kW (1C)."
+        )
+    elif max_c > 1.0:
+        st.warning(
+            f"⚠️ **C-rate = {max_c:.1f}C** — Boven 1C. Sommige batterijen ondersteunen dit "
+            f"(bijv. LFP-chemie), maar het versnelt slijtage. "
+            f"Aanbevolen: max_power_kw ≤ {battery_kwh * 0.5:.0f}–{battery_kwh * 1.0:.0f} kW."
+        )
+    else:
+        st.success(f"✅ C-rate = {max_c:.2f}C — Binnen veilig bereik (≤ 1C)")
+
+    st.caption(
+        "ℹ️ **max_power_kw** = AC-vermogen aan de netzijde (omvormerrating). "
+        "De batterij zelf laadt op {:.0f}% van dit vermogen ({:.2f} kW) door omvormerverliezen.".format(
+            ETA * 100, ETA * max_power_kw
+        )
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar — Data Sources
@@ -617,30 +665,43 @@ if st.session_state.get("scenarios_pending"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Rule-based simulation
+# ─────────────────────────────────────────────────────────────────────────────
 def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh,
                    neg_boost, min_soc=0.10, init_soc=0.50):
-    soc     = init_soc
+    """
+    Rule-based batterijsimulatie — zelfde efficiency als MILP (eta = sqrt(0.92)).
+
+    max_e = AC-zijde nettransport per 15-min slot (pwr_kw × 0.25 h).
+      Laden:    batterij ontvangt  eta × max_e  kWh  (omvormerverliezen grid→bat)
+      Ontladen: batterij levert    max_e / eta  kWh  (omvormerverliezen bat→grid)
+    """
+    eta     = 0.92 ** 0.5            # ≈ 0.9592 — zelfde als MILP optimizer
+    soc     = init_soc               # fractie van cap_kwh (0.0–1.0)
+    max_e   = (pwr_kw * 0.25) / 1000  # MWh per slot (AC-netgrens)
     cap_mwh = cap_kwh / 1000
-    max_e   = (pwr_kw * 0.25) / 1000
     results = []
     cum_rev = 0.0
     for _, row in data.iterrows():
         p = row["price_eur_mwh"]; action = "HOLD"; e_mwh = 0.0; rev = 0.0
         if p < 0 and neg_boost:
-            e = min(max_e, (1 - soc) * cap_mwh / 0.96)
+            # max AC van net = max_e; batterij ontvangt eta × max_e
+            e = min(max_e, (1 - soc) * cap_mwh / eta)
             if e > 0.0001:
-                e_mwh = e; soc += e_mwh * 0.96 / cap_mwh
+                e_mwh = e; soc += e_mwh * eta / cap_mwh
                 rev = -e_mwh * p; action = "CHARGE (NEG)"
         elif p < ch_thresh:
-            e = min(max_e, (1 - soc) * cap_mwh / 0.96)
+            e = min(max_e, (1 - soc) * cap_mwh / eta)
             if e > 0.0001:
-                e_mwh = e; soc += e_mwh * 0.96 / cap_mwh
+                e_mwh = e; soc += e_mwh * eta / cap_mwh
                 rev = -e_mwh * p; action = "CHARGE"
         elif p > dis_thresh:
-            dp = min(max_e, max(0.0, (soc - min_soc) * cap_mwh * 0.96))
-            if dp > 0.0001:
-                e_mwh = dp; soc -= e_mwh / (cap_mwh * 0.96)
-                rev = e_mwh * p; action = "DISCHARGE"
+            # max AC naar net = max_e; batterij levert max_e / eta
+            avail_ac = min(max_e, (soc - min_soc) * cap_mwh * eta)
+            if avail_ac > 0.0001:
+                e_mwh = avail_ac
+                soc  -= e_mwh / (eta * cap_mwh)
+                rev   = e_mwh * p; action = "DISCHARGE"
         cum_rev += rev
         results.append({"datetime": row["datetime"], "price": p, "action": action,
                          "energy_kwh": e_mwh * 1000, "revenue": rev,
