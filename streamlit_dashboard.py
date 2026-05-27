@@ -106,16 +106,34 @@ st.set_page_config(page_title="EMS Belgium MVP", layout="wide", page_icon="⚡")
 def _load_secret(key: str) -> str:
     """
     Laad een secret veilig — werkt zowel lokaal (.streamlit/secrets.toml)
-    als op Streamlit Cloud. Geeft lege string terug als key ontbreekt.
+    als op Streamlit Cloud. Geeft lege string terug als key ontbreekt
+    of als de waarde nog een placeholder is.
     """
+    # Bekende placeholders die we moeten negeren
+    _PLACEHOLDERS = {
+        "your-entsoe-api-key-here",
+        "your-em-api-key-here",
+        "paste-your-key-here",
+        "YOUR_API_KEY_HERE",
+        "PASTE_YOUR_ELECTRICITY_MAPS_API_KEY_HERE",
+        "xxx",
+        "your_key_here",
+    }
     try:
         val = st.secrets.get(key, "")
-        return val if isinstance(val, str) else ""
+        val = val if isinstance(val, str) else ""
     except Exception:
         try:
-            return str(st.secrets[key])
+            val = str(st.secrets[key])
         except Exception:
             return ""
+
+    # Negeer placeholders en te korte waarden (echte keys zijn altijd ≥ 10 tekens)
+    if not val or val.strip().lower() in {p.lower() for p in _PLACEHOLDERS}:
+        return ""
+    if len(val.strip()) < 10:
+        return ""
+    return val.strip()
 
 # Laad alle API keys eenmalig in session_state (nooit overschrijven als al ingevuld)
 for _key in ("entsoe_key", "em_key"):
@@ -323,10 +341,16 @@ if ENTSOE_AVAILABLE:
         entsoe_key = st.text_input(
             "ENTSO-E API Key", type="password",
             value=st.session_state.get("entsoe_key", ""),
-            key="entsoe_key_input"
+            placeholder="Plak hier je ENTSO-E API key…",
+            key="entsoe_key_input",
         )
-        if entsoe_key:
-            st.session_state.entsoe_key = entsoe_key
+        if entsoe_key and len(entsoe_key.strip()) >= 10:
+            st.session_state.entsoe_key = entsoe_key.strip()
+            st.caption("✅ API key ingevuld")
+        elif entsoe_key:
+            st.warning("Key lijkt te kort — controleer of je de volledige key geplakt hebt.")
+        elif not st.session_state.get("entsoe_key"):
+            st.caption("⚠️ Geen key — ophaalknoppen werken niet tot je een key invult.")
 
         # Preset fetch buttons
         c1, c2, c3 = st.columns(3)
@@ -362,10 +386,14 @@ if ELECTRICITY_MAPS_AVAILABLE:
         em_key = st.text_input(
             "EM API Key", type="password",
             value=st.session_state.get("em_key", ""),
-            key="em_key_input"
+            placeholder="Plak hier je Electricity Maps API key…",
+            key="em_key_input",
         )
-        if em_key:
-            st.session_state.em_key = em_key
+        if em_key and len(em_key.strip()) >= 10:
+            st.session_state.em_key = em_key.strip()
+            st.caption("✅ API key ingevuld")
+        elif em_key:
+            st.warning("Key lijkt te kort — controleer de volledige key.")
         if st.button("📥 Fetch (combined)", key="btn_em"):
             if not em_key:
                 st.error("API key nodig.")
