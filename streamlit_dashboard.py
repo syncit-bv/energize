@@ -707,6 +707,7 @@ if st.session_state.milp_pending:
                 min_end_soc=min_end_soc_pct / 100,
                 initial_soc=st.session_state.get("milp_initial_soc", 0.50),
                 time_horizon_hours=None,
+                execute_until=sel_end,   # rolling horizon: morgen = lookahead
             )
             milp_summary["horizon_label"]   = horizon_label
             milp_summary["is_multiday"]     = da_published and tomorrow_in_df
@@ -798,7 +799,10 @@ if st.session_state.get("scenarios_pending"):
 
     try:
         prog.progress(10, text="▶ Scenario 1/4: MILP Basis (geselecteerde periode)…")
-        sch1, s1 = optimize_battery_schedule(sim_df, label="MILP Basis", **milp_args)
+        sch1, s1 = optimize_battery_schedule(
+            sim_df, label="MILP Basis",
+            execute_until=sel_end,   # geen lookahead, enkel geselecteerde periode
+            **milp_args)
         scenarios["milp_basic"] = (sch1, s1)
         prog.progress(35, text="▶ Scenario 2/4: MILP + Day-ahead…")
     except Exception as e:
@@ -807,7 +811,9 @@ if st.session_state.get("scenarios_pending"):
 
     try:
         sch2, s2 = optimize_battery_schedule(
-            milp_da_input, label=f"MILP+DA ({da_label})", **milp_args)
+            milp_da_input, label=f"MILP+DA ({da_label})",
+            execute_until=sel_end,   # rolling horizon: morgen = lookahead
+            **milp_args)
         scenarios["milp_da"] = (sch2, s2)
         prog.progress(65, text="▶ Scenario 3/4: MILP + Day-ahead + Solar…")
     except Exception as e:
@@ -831,7 +837,9 @@ if st.session_state.get("scenarios_pending"):
             solar_loaded = not solar_kwh.empty and solar_kwh.sum() > 0
             solar_label  = f"MILP+DA+Solar ({own_kwp}kWp)" if solar_loaded else "MILP+DA+Solar (geen solar data)"
             sch3, s3 = optimize_battery_schedule_solar(
-                milp_da_input, solar_kwh, label=solar_label, **milp_args)
+                milp_da_input, solar_kwh, label=solar_label,
+                execute_until=sel_end,   # rolling horizon
+                **milp_args)
             s3["solar_own_kwp"]     = own_kwp
             s3["solar_data_loaded"] = solar_loaded
             scenarios["milp_solar"] = (sch3, s3)
@@ -1134,17 +1142,20 @@ if st.session_state.get("scenarios"):
     }
 
     # ── Samenvattingstabel ─────────────────────────────────────────────────
-    rows = []
-    rb_rev = sim["cum_rev"].iloc[-1]
+    rb_slots = len(sim)
+    rb_rev   = sim["cum_rev"].iloc[-1]
+    rows     = []
 
     rows.append({
-        "Scenario":       "1️⃣ Rule-based",
-        "Net Revenue (€)": f"{rb_rev:.2f}",
-        "Geladen (kWh)":  f"{sim['energy_kwh'].sum():.1f}",
-        "Ontladen (kWh)": f"{sim[sim['action']=='DISCHARGE']['energy_kwh'].sum():.1f}",
-        "Eind SOC (%)":   f"{sim['soc'].iloc[-1]:.1f}",
-        "Verbetering":    "—",
-        "Solver":         "n.v.t.",
+        "Scenario":          "1️⃣ Rule-based",
+        "Slots (execute)":   rb_slots,
+        "Slots (lookahead)": 0,
+        "Net Revenue (€)":   f"{rb_rev:.2f}",
+        "Geladen (kWh)":     f"{sim['energy_kwh'].sum():.1f}",
+        "Ontladen (kWh)":    f"{sim[sim['action']=="DISCHARGE"]['energy_kwh'].sum():.1f}",
+        "Eind SOC (%)":      f"{sim['soc'].iloc[-1]:.1f}",
+        "Verbetering":       "—",
+        "Solver":            "n.v.t.",
     })
 
     emoji = ["2️⃣", "3️⃣", "4️⃣"]
@@ -1153,28 +1164,43 @@ if st.session_state.get("scenarios"):
 
     for i, (key, name) in enumerate(zip(keys, names)):
         if key in scen:
-            _, s = scen[key]
-            rev  = s["total_net_revenue_eur"]
+            _, s    = scen[key]
+            rev     = s.get("revenue_execute_eur", s["total_net_revenue_eur"])
+            n_exec  = s.get("num_slots_execute", s["num_slots"])
+            n_lah   = s.get("num_slots_lookahead", 0)
+            rev_lah = s.get("revenue_lookahead_eur", 0)
+            lah_note = f" (+{rev_lah:.2f}€ lookahead)" if n_lah > 0 else ""
             rows.append({
-                "Scenario":        f"{emoji[i]} {name}",
-                "Net Revenue (€)":  f"{rev:.2f}",
-                "Geladen (kWh)":    f"{s['total_charged_kwh']:.1f}",
-                "Ontladen (kWh)":   f"{s['total_discharged_kwh']:.1f}",
-                "Eind SOC (%)":     f"{s['final_soc_pct']:.1f}",
-                "Verbetering":      f"+{rev - rb_rev:.2f} €" if rev > rb_rev else f"{rev - rb_rev:.2f} €",
-                "Solver":           f"{s['status']} | {s['solve_time_sec']}s | {s['solver_iterations']:,} iter",
+                "Scenario":          f"{emoji[i]} {name}",
+                "Slots (execute)":   n_exec,
+                "Slots (lookahead)": n_lah,
+                "Net Revenue (€)":   f"{rev:.2f}{lah_note}",
+                "Geladen (kWh)":     f"{s['total_charged_kwh']:.1f}",
+                "Ontladen (kWh)":    f"{s['total_discharged_kwh']:.1f}",
+                "Eind SOC (%)":      f"{s['final_soc_pct']:.1f}",
+                "Verbetering":       f"+{rev - rb_rev:.2f} €" if rev > rb_rev else f"{rev - rb_rev:.2f} €",
+                "Solver":            f"{s['status']} | {s['solve_time_sec']}s | {s['solver_iterations']:,} iter",
             })
         elif key in scen_errors:
             rows.append({
                 "Scenario": f"{emoji[i]} {name}",
-                "Net Revenue (€)": "❌",
-                "Geladen (kWh)": "—", "Ontladen (kWh)": "—",
-                "Eind SOC (%)": "—", "Verbetering": "—",
-                "Solver": scen_errors[key][:60],
+                "Slots (execute)": "—", "Slots (lookahead)": "—",
+                "Net Revenue (€)": "❌", "Geladen (kWh)": "—",
+                "Ontladen (kWh)": "—", "Eind SOC (%)": "—",
+                "Verbetering": "—", "Solver": scen_errors[key][:60],
             })
 
     comp_df = pd.DataFrame(rows)
     st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+    # Uitleg rolling horizon
+    has_lookahead = any(r.get("Slots (lookahead)", 0) not in (0, "—") for r in rows[1:])
+    if has_lookahead:
+        st.caption(
+            "ℹ️ **Rolling Horizon (MPC)**: 'Net Revenue' = enkel de execute-periode (vandaag). "
+            "De lookahead-slots (morgen) sturen de optimale eind-SOC aan maar worden "
+            "niet uitgevoerd en tellen niet mee in de vergelijking."
+        )
 
     # ── Revenue vergelijking bar chart ─────────────────────────────────────
     bar_labels = [r["Scenario"] for r in rows]
@@ -1182,8 +1208,9 @@ if st.session_state.get("scenarios"):
     bar_colors = ["royalblue", "#E67E22", "#27AE60", "#8E44AD"]
     for r in rows:
         try:
-            bar_values.append(float(r["Net Revenue (€)"]))
-        except ValueError:
+            # Haal enkel het numerieke gedeelte (vóór eventuele lah-note)
+            bar_values.append(float(str(r["Net Revenue (€)"]).split(" ")[0]))
+        except (ValueError, TypeError):
             bar_values.append(0.0)
 
     fig_bar = go.Figure(go.Bar(
@@ -1193,7 +1220,7 @@ if st.session_state.get("scenarios"):
         textposition="outside",
     ))
     fig_bar.update_layout(
-        title="Net Revenue per Scenario (€)",
+        title="Net Revenue per Scenario — Execute periode (€)",
         yaxis_title="€", xaxis_title="",
         showlegend=False,
         height=350,
@@ -1208,25 +1235,38 @@ if st.session_state.get("scenarios"):
         line=dict(color="royalblue", width=1.5, dash="dash")))
 
     for key, name, dash_style in [
-        ("milp_basic", "MILP Basis",         "dash"),
-        ("milp_da",    "MILP + Day-ahead",   "dot"),
+        ("milp_basic", "MILP Basis",          "dash"),
+        ("milp_da",    "MILP + Day-ahead",    "dot"),
         ("milp_solar", "MILP + DA + Solar ☀️","dashdot"),
     ]:
         if key in scen:
             sch_k, _ = scen[key]
-            # Toon enkel de geselecteerde periode (niet tomorrow extension)
-            sch_period = sch_k[sch_k["datetime"].dt.date <= sel_end]
             color = COLORS[key][0]
+            # Execute-periode: volle lijn
+            exec_part = sch_k[~sch_k["is_lookahead"]] if "is_lookahead" in sch_k.columns \
+                        else sch_k[sch_k["datetime"].dt.date <= sel_end]
             fig_soc_all.add_trace(go.Scatter(
-                x=sch_period["datetime"], y=sch_period["soc_pct"],
+                x=exec_part["datetime"], y=exec_part["soc_pct"],
                 mode="lines", name=name,
                 line=dict(color=color, width=2, dash=dash_style)))
+            # Lookahead-periode: transparant, gestippeld
+            lah_part = sch_k[sch_k["is_lookahead"]] if "is_lookahead" in sch_k.columns \
+                       else pd.DataFrame()
+            if not lah_part.empty:
+                # Verbind execute met lookahead (geen gat in de lijn)
+                bridge = exec_part.tail(1)
+                lah_full = pd.concat([bridge, lah_part])
+                fig_soc_all.add_trace(go.Scatter(
+                    x=lah_full["datetime"], y=lah_full["soc_pct"],
+                    mode="lines", name=f"{name} (lookahead morgen)",
+                    line=dict(color=color, width=1.5, dash="dot"),
+                    opacity=0.4, showlegend=False))
 
     fig_soc_all.add_hline(y=min_soc_pct, line_dash="dash", line_color="orange",
         annotation_text=f"Min {min_soc_pct}% reserve")
     fig_soc_all.update_yaxes(range=[0, 100], title="SOC (%)")
     fig_soc_all.update_layout(
-        title="Battery State of Charge — Alle Scenario's",
+        title="Battery State of Charge — Alle Scenario's (transparant = lookahead morgen)",
         xaxis_title="Tijd",
         legend=dict(orientation="h", y=-0.2))
     st.plotly_chart(fig_soc_all, use_container_width=True)
@@ -1239,22 +1279,35 @@ if st.session_state.get("scenarios"):
         line=dict(color="royalblue", width=1.5, dash="dash")))
 
     for key, name, dash_style in [
-        ("milp_basic", "MILP Basis",         "dash"),
-        ("milp_da",    "MILP + Day-ahead",   "dot"),
+        ("milp_basic", "MILP Basis",          "dash"),
+        ("milp_da",    "MILP + Day-ahead",    "dot"),
         ("milp_solar", "MILP + DA + Solar ☀️","dashdot"),
     ]:
         if key in scen:
             sch_k, _ = scen[key]
-            sch_period = sch_k[sch_k["datetime"].dt.date <= sel_end].copy()
-            sch_period["cum_rev"] = sch_period["net_revenue_eur"].cumsum()
             color = COLORS[key][0]
+            exec_part = sch_k[~sch_k["is_lookahead"]].copy() if "is_lookahead" in sch_k.columns \
+                        else sch_k[sch_k["datetime"].dt.date <= sel_end].copy()
+            exec_part["cum_rev"] = exec_part["net_revenue_eur"].cumsum()
             fig_rev_all.add_trace(go.Scatter(
-                x=sch_period["datetime"], y=sch_period["cum_rev"],
+                x=exec_part["datetime"], y=exec_part["cum_rev"],
                 mode="lines", name=name,
                 line=dict(color=color, width=2, dash=dash_style)))
+            # Lookahead
+            lah_part = sch_k[sch_k["is_lookahead"]].copy() if "is_lookahead" in sch_k.columns \
+                       else pd.DataFrame()
+            if not lah_part.empty:
+                bridge     = exec_part.tail(1).copy()
+                lah_part["cum_rev"] = bridge["cum_rev"].iloc[0] + lah_part["net_revenue_eur"].cumsum()
+                lah_full   = pd.concat([bridge[["datetime","cum_rev"]], lah_part[["datetime","cum_rev"]]])
+                fig_rev_all.add_trace(go.Scatter(
+                    x=lah_full["datetime"], y=lah_full["cum_rev"],
+                    mode="lines", name=f"{name} (lookahead)",
+                    line=dict(color=color, width=1.5, dash="dot"),
+                    opacity=0.4, showlegend=False))
 
     fig_rev_all.update_layout(
-        title="Cumulatieve Revenue — Alle Scenario's (€)",
+        title="Cumulatieve Revenue — Execute periode (transparant = lookahead morgen)",
         xaxis_title="Tijd", yaxis_title="€",
         legend=dict(orientation="h", y=-0.2))
     st.plotly_chart(fig_rev_all, use_container_width=True)

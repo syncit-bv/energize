@@ -1,27 +1,35 @@
 #!/usr/bin/env python3
 """
-MILP Optimizer for EMS Belgium — v1.3
-================================
+MILP Optimizer for EMS Belgium — v1.4
+======================================
 Drie optimalisatie-niveaus:
   1. optimize_battery_schedule()        — standaard arbitrage
-  2. optimize_battery_schedule()        — zelfde, maar met uitgebreid horizon (day-ahead)
+  2. optimize_battery_schedule()        — met day-ahead lookahead (MPC rolling horizon)
   3. optimize_battery_schedule_solar()  — arbitrage + gratis solar laden
 
-Alle functies leveren (result_df, summary_dict) op met solve_time en solver_iterations.
+Rolling Horizon (MPC) aanpak:
+  execute_until = datum tot wanneer trades worden "uitgevoerd"
+  Slots ná execute_until = lookahead: beïnvloeden de end-SOC keuze maar
+  worden NIET uitgevoerd en tellen NIET mee in de revenue vergelijking.
+
+  Voorbeeld: execute_until=vandaag, lookahead=morgen
+  → MILP weet wat morgen's prijzen zijn en laadt vandaag optimaal vol
+  → Morgen's trades staan als is_lookahead=True in result_df
+  → summary["revenue_execute_eur"] = enkel vandaag's revenue
 """
 
 import io, re, time, contextlib
-from typing import Dict, Tuple, Optional
+from datetime import date, datetime
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 import pulp
 
-# België totale geïnstalleerde solar capaciteit (MWp, schatting 2026)
 BE_TOTAL_SOLAR_MWP = 9_500.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Standaard MILP (basis + day-ahead — zelfde functie, ander input)
+# 1. Standaard MILP + Day-ahead (rolling horizon)
 # ─────────────────────────────────────────────────────────────────────────────
 def optimize_battery_schedule(
     prices_df: pd.DataFrame,
@@ -33,20 +41,34 @@ def optimize_battery_schedule(
     initial_soc: float = 0.50,
     time_horizon_hours: Optional[int] = None,
     label: str = "MILP",
+    execute_until: Optional[date] = None,
 ) -> Tuple[pd.DataFrame, Dict]:
     """
-    Standaard battery arbitrage MILP.
+    Battery arbitrage MILP met optionele rolling horizon.
 
-    Geef prices_df met enkel de geselecteerde periode → MILP basis.
-    Geef prices_df uitgebreid met morgen's prijzen  → MILP + day-ahead.
-    De optimizer ziet het verschil niet — de horizon bepaalt het gedrag.
+    Parameters
+    ----------
+    execute_until : date, optional
+        Enkel slots op of vóór deze datum worden als "te executeren" beschouwd.
+        Slots na execute_until zijn lookahead: MILP gebruikt ze om de optimale
+        end-SOC te bepalen, maar ze worden niet uitgevoerd en tellen niet mee
+        in revenue_execute_eur.
+        None = alle slots uitvoeren (MILP Basis).
     """
     df = _select_slots(prices_df, time_horizon_hours)
     if df.empty:
         raise ValueError("Geen prijsdata meegegeven aan optimizer.")
 
-    T  = len(df)
-    dt = 0.25
+    T   = len(df)
+    dt  = 0.25
+    eta = efficiency ** 0.5
+
+    # Bepaal welke slots "execute" zijn vs "lookahead"
+    if execute_until is not None:
+        exec_mask = pd.to_datetime(df["datetime"]).dt.date <= execute_until
+    else:
+        exec_mask = pd.Series([True] * T)
+    n_execute = int(exec_mask.sum())
 
     prob      = pulp.LpProblem("Battery_Arbitrage", pulp.LpMaximize)
     charge    = pulp.LpVariable.dicts("C", range(T), lowBound=0, cat="Continuous")
@@ -58,6 +80,8 @@ def optimize_battery_schedule(
         cat="Continuous",
     )
 
+    # Objectief: maximaliseer revenue over ALLE slots (lookahead motiveert MILP
+    # om de juiste end-SOC te kiezen, ook al worden die trades niet uitgevoerd)
     prob += pulp.lpSum(
         discharge[t] * df.iloc[t]["price_eur_mwh"] / 1000
         - charge[t]  * df.iloc[t]["price_eur_mwh"] / 1000
@@ -68,7 +92,6 @@ def optimize_battery_schedule(
     prob += soc[T] >= min_end_soc * battery_kwh,  "Min_End_SOC"
 
     max_e = max_power_kw * dt
-    eta   = efficiency ** 0.5
 
     for t in range(T):
         prob += soc[t+1] == soc[t] + eta * charge[t] - discharge[t] / eta, f"Dyn_{t}"
@@ -76,13 +99,16 @@ def optimize_battery_schedule(
         prob += discharge[t] <= max_e, f"Dmax_{t}"
 
     result_df, summary = _solve_and_extract(
-        prob, df, T, battery_kwh, charge, discharge, soc, label=label
+        prob, df, T, battery_kwh, charge, discharge, soc,
+        label=label,
+        exec_mask=exec_mask,
+        n_execute=n_execute,
     )
     return result_df, summary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. MILP + Solar self-consumption
+# 2. MILP + Solar self-consumption (rolling horizon)
 # ─────────────────────────────────────────────────────────────────────────────
 def optimize_battery_schedule_solar(
     prices_df: pd.DataFrame,
@@ -95,29 +121,23 @@ def optimize_battery_schedule_solar(
     initial_soc: float = 0.50,
     time_horizon_hours: Optional[int] = None,
     label: str = "MILP+Solar",
+    execute_until: Optional[date] = None,
 ) -> Tuple[pd.DataFrame, Dict]:
-    """
-    MILP met solar self-consumption model.
-
-    Twee laad-variabelen per tijdstip:
-      charge_grid[t]  — laden van het net  (kost day-ahead prijs)
-      charge_solar[t] — laden van eigen PV (GRATIS — geen grid kost)
-
-    charge_solar[t] ≤ solar_kwh_per_slot[t]   (beperkt door eigen productie)
-    charge_grid[t] + charge_solar[t] ≤ max_e  (beperkt door max vermogen)
-
-    Doel: maximaliseer revenue van ontladen MINUS gridkosten van laden.
-    """
+    """MILP met solar self-consumption + optionele rolling horizon."""
     df = _select_slots(prices_df, time_horizon_hours)
     if df.empty:
-        raise ValueError("Geen prijsdata meegegeven aan optimizer.")
+        raise ValueError("Geen prijsdata meegegeven.")
 
-    T  = len(df)
-    dt = 0.25
+    T   = len(df)
+    dt  = 0.25
+    eta = efficiency ** 0.5
 
-    # Align solar_kwh_per_slot op df's tijdslots (reindex, fill 0)
-    if hasattr(solar_kwh_per_slot, "index") and hasattr(solar_kwh_per_slot.index, "tz_localize"):
-        pass  # already has index
+    if execute_until is not None:
+        exec_mask = pd.to_datetime(df["datetime"]).dt.date <= execute_until
+    else:
+        exec_mask = pd.Series([True] * T)
+    n_execute = int(exec_mask.sum())
+
     solar_vals = _align_solar(solar_kwh_per_slot, df)
 
     prob          = pulp.LpProblem("Battery_Solar_MILP", pulp.LpMaximize)
@@ -131,7 +151,6 @@ def optimize_battery_schedule_solar(
         cat="Continuous",
     )
 
-    # Doel: discharge-inkomsten MINUS grid-laadkosten (solar laden is gratis)
     prob += pulp.lpSum(
         discharge[t] * df.iloc[t]["price_eur_mwh"] / 1000
         - charge_grid[t] * df.iloc[t]["price_eur_mwh"] / 1000
@@ -142,77 +161,52 @@ def optimize_battery_schedule_solar(
     prob += soc[T] >= min_end_soc * battery_kwh,  "Min_End_SOC"
 
     max_e = max_power_kw * dt
-    eta   = efficiency ** 0.5
 
     for t in range(T):
         solar_avail = float(solar_vals[t])
         prob += (soc[t+1] == soc[t]
                  + eta * (charge_grid[t] + charge_solar[t])
                  - discharge[t] / eta), f"Dyn_{t}"
-        # Max totaal laadvermogen
         prob += charge_grid[t] + charge_solar[t] <= max_e, f"Cmax_{t}"
-        # Solar beperkt door eigen productie
-        prob += charge_solar[t] <= solar_avail, f"Solar_{t}"
-        # Discharge beperkt door max vermogen
-        prob += discharge[t] <= max_e, f"Dmax_{t}"
+        prob += charge_solar[t] <= solar_avail,             f"Solar_{t}"
+        prob += discharge[t]    <= max_e,                   f"Dmax_{t}"
 
-    # Extraheer resultaten (inclusief solar split)
     result_df, summary = _solve_and_extract(
         prob, df, T, battery_kwh, charge_grid, discharge, soc,
         label=label,
         extra_charge=charge_solar,
         solar_vals=solar_vals,
+        exec_mask=exec_mask,
+        n_execute=n_execute,
     )
     return result_df, summary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Solar helper: schaal Elia-brede forecast naar eigen installatie
+# 3. Solar helper
 # ─────────────────────────────────────────────────────────────────────────────
 def estimate_own_solar_kwh(
     solar_df: pd.DataFrame,
     own_kwp: float = 6.3,
     be_total_mwp: float = BE_TOTAL_SOLAR_MWP,
 ) -> pd.Series:
-    """
-    Schaal de Elia-brede solar forecast (MW) naar eigen installatie (kWh/kwartier).
-
-    Formule:
-      eigen_productie_kw = (forecast_be_mw × 1000 kW/MW) × (eigen_kwp / be_total_kwp)
-      eigen_productie_kwh_per_slot = eigen_productie_kw × 0.25 h
-
-    Parameters:
-      solar_df   : DataFrame van EliaClient.get_solar_forecast() of get_historical_solar()
-      own_kwp    : eigen PV-vermogen in kWp (default 6.3 kWp)
-      be_total_mwp: totale Belgische solar capaciteit in MWp (default 9500)
-
-    Returns:
-      pd.Series indexed by datetime, waarden in kWh per 15-min slot
-    """
+    """Schaal Elia-brede solar forecast (MW) naar eigen installatie (kWh/kwartier)."""
     if solar_df.empty or "datetime" not in solar_df.columns:
         return pd.Series(dtype=float)
 
-    # Zoek de meest bruikbare forecast kolom
-    priority = ["dayaheadforecast", "mostrecentforecast", "weekaheadforecast",
-                 "measured", "upscaled"]
-    forecast_col = None
+    priority  = ["dayaheadforecast","mostrecentforecast","weekaheadforecast","measured","upscaled"]
     col_lower = {c.lower(): c for c in solar_df.columns}
-    for cand in priority:
-        if cand.lower() in col_lower:
-            forecast_col = col_lower[cand.lower()]
-            break
-
+    forecast_col = next((col_lower[c] for c in priority if c in col_lower), None)
     if forecast_col is None:
-        # Laatste redmiddel: eerste numerieke kolom
         num_cols = solar_df.select_dtypes(include="number").columns.tolist()
         if num_cols:
             forecast_col = num_cols[0]
         else:
             return pd.Series(dtype=float)
 
-    fraction       = own_kwp / (be_total_mwp * 1000)  # fractie van totale kW capaciteit
-    own_kw         = solar_df[forecast_col].clip(lower=0) * 1000 * fraction  # kW
-    own_kwh_slot   = own_kw * 0.25  # kWh per 15-min slot
+    fraction     = own_kwp / (be_total_mwp * 1000)
+    own_kw       = solar_df[forecast_col].clip(lower=0) * 1000 * fraction
+    own_kwh_slot = own_kw * 0.25
 
     return pd.Series(
         own_kwh_slot.values,
@@ -224,30 +218,23 @@ def estimate_own_solar_kwh(
 # ─────────────────────────────────────────────────────────────────────────────
 # Interne helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def _select_slots(prices_df: pd.DataFrame, time_horizon_hours: Optional[int]) -> pd.DataFrame:
+def _select_slots(prices_df, time_horizon_hours):
     if time_horizon_hours is None or time_horizon_hours <= 0:
         return prices_df.copy()
     return prices_df.head(int(time_horizon_hours * 4)).copy()
 
 
-def _align_solar(solar_series: pd.Series, prices_df: pd.DataFrame) -> list:
-    """
-    Align solar kWh series met de tijdslots in prices_df.
-    Geeft een lijst van float waarden (0.0 als geen solar data voor dat slot).
-    """
+def _align_solar(solar_series, prices_df):
     if solar_series is None or solar_series.empty:
         return [0.0] * len(prices_df)
-
     try:
         idx = pd.DatetimeIndex(solar_series.index)
         if idx.tz is None:
             idx = idx.tz_localize("UTC")
         solar_indexed = pd.Series(solar_series.values, index=idx)
-
         price_idx = pd.DatetimeIndex(prices_df["datetime"])
         if price_idx.tz is None:
             price_idx = price_idx.tz_localize("UTC")
-
         aligned = solar_indexed.reindex(price_idx, method="nearest", tolerance="20min").fillna(0.0)
         return aligned.clip(lower=0).tolist()
     except Exception:
@@ -260,57 +247,85 @@ def _solve_and_extract(
     label="MILP",
     extra_charge=None,
     solar_vals=None,
+    exec_mask=None,
+    n_execute=None,
 ) -> Tuple[pd.DataFrame, Dict]:
-    """Solve, extract results en bouw summary dict."""
+    """Solve en extraheer resultaten met execute/lookahead splitsing."""
+    if exec_mask is None:
+        exec_mask = pd.Series([True] * T)
+    if n_execute is None:
+        n_execute = T
+
     t_start    = time.time()
     log_buffer = io.StringIO()
     with contextlib.redirect_stdout(log_buffer):
         status = prob.solve(pulp.PULP_CBC_CMD(msg=True, timeLimit=60))
-    solve_time  = round(time.time() - t_start, 2)
-    solver_log  = log_buffer.getvalue()
-    iterations  = _parse_iterations(solver_log)
+    solve_time = round(time.time() - t_start, 2)
+    solver_log = log_buffer.getvalue()
+    iterations = _parse_iterations(solver_log)
 
     results = []
     for t in range(T):
         c_kwh  = pulp.value(charge_var[t])    or 0.0
-        cs_kwh = pulp.value(extra_charge[t])  if extra_charge else 0.0
-        cs_kwh = cs_kwh or 0.0
+        cs_kwh = (pulp.value(extra_charge[t]) or 0.0) if extra_charge else 0.0
         d_kwh  = pulp.value(discharge_var[t]) or 0.0
         s_kwh  = pulp.value(soc_var[t + 1])   or 0.0
         p      = df.iloc[t]["price_eur_mwh"]
-        rev    = d_kwh * p / 1000 - c_kwh * p / 1000  # solar charge heeft geen gridkost
+        rev    = d_kwh * p / 1000 - c_kwh * p / 1000
+        is_lah = not bool(exec_mask.iloc[t])
 
         row = {
-            "datetime":         df.iloc[t]["datetime"],
-            "price_eur_mwh":    p,
-            "charge_kwh":       c_kwh + cs_kwh,     # totaal laden
-            "charge_grid_kwh":  c_kwh,               # laden van net
-            "charge_solar_kwh": cs_kwh,              # laden van solar
-            "discharge_kwh":    d_kwh,
-            "soc_kwh":          s_kwh,
-            "soc_pct":          s_kwh / battery_kwh * 100,
-            "net_revenue_eur":  rev,
+            "datetime":          df.iloc[t]["datetime"],
+            "price_eur_mwh":     p,
+            "charge_kwh":        c_kwh + cs_kwh,
+            "charge_grid_kwh":   c_kwh,
+            "charge_solar_kwh":  cs_kwh,
+            "discharge_kwh":     d_kwh,
+            "soc_kwh":           s_kwh,
+            "soc_pct":           s_kwh / battery_kwh * 100,
+            "net_revenue_eur":   rev,
+            "is_lookahead":      is_lah,   # True = morgen/preview, niet uitvoeren
         }
         if solar_vals:
             row["solar_available_kwh"] = solar_vals[t]
         results.append(row)
 
-    result_df = pd.DataFrame(results)
-    total_rev = pulp.value(prob.objective) or 0.0
+    result_df   = pd.DataFrame(results)
+    total_rev   = pulp.value(prob.objective) or 0.0
+
+    # Revenue splitsing: execute vs lookahead
+    exec_df   = result_df[~result_df["is_lookahead"]]
+    lah_df    = result_df[ result_df["is_lookahead"]]
+    rev_exec  = round(exec_df["net_revenue_eur"].sum(), 4)
+    rev_lah   = round(lah_df["net_revenue_eur"].sum(),  4)
+
+    # SOC aan het einde van de execute-periode (= aanbevolen midnight SOC)
+    final_exec_soc = round(exec_df["soc_pct"].iloc[-1], 1) if not exec_df.empty else \
+                     round(result_df["soc_pct"].iloc[-1], 1)
 
     summary = {
-        "label":                  label,
-        "status":                 pulp.LpStatus[status],
-        "total_net_revenue_eur":  round(total_rev, 4),
-        "total_charged_kwh":      round(result_df["charge_kwh"].sum(), 2),
-        "total_charged_grid_kwh": round(result_df["charge_grid_kwh"].sum(), 2),
-        "total_charged_solar_kwh":round(result_df["charge_solar_kwh"].sum(), 2),
-        "total_discharged_kwh":   round(result_df["discharge_kwh"].sum(), 2),
-        "final_soc_pct":          round(result_df["soc_pct"].iloc[-1], 1),
-        "num_slots":              T,
-        "solve_time_sec":         solve_time,
-        "solver_iterations":      iterations,
-        "solver_log":             solver_log,
+        "label":                   label,
+        "status":                  pulp.LpStatus[status],
+        # Revenue
+        "total_net_revenue_eur":   rev_exec,    # ← alleen execute-periode (correcte vergelijking)
+        "revenue_execute_eur":     rev_exec,    # expliciet
+        "revenue_lookahead_eur":   rev_lah,     # morgen's gepland maar niet uitgevoerd
+        # Slots
+        "num_slots":               T,
+        "num_slots_execute":       n_execute,
+        "num_slots_lookahead":     T - n_execute,
+        # Energie
+        "total_charged_kwh":       round(exec_df["charge_kwh"].sum(), 2),
+        "total_charged_grid_kwh":  round(exec_df["charge_grid_kwh"].sum(), 2),
+        "total_charged_solar_kwh": round(exec_df["charge_solar_kwh"].sum(), 2),
+        "total_discharged_kwh":    round(exec_df["discharge_kwh"].sum(), 2),
+        # SOC
+        "final_soc_pct":           final_exec_soc,
+        "final_lookahead_soc_pct": round(result_df["soc_pct"].iloc[-1], 1),
+        # Solver
+        "solve_time_sec":          solve_time,
+        "solver_iterations":       iterations,
+        "solver_log":              solver_log,
     }
     return result_df, summary
 
@@ -331,31 +346,37 @@ def _parse_iterations(log: str) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import numpy as np
+    from datetime import date, timedelta
 
-    dates  = pd.date_range("2026-05-26", periods=96, freq="15min", tz="UTC")
-    prices = np.concatenate([
-        np.full(12, -80),  # 00-03: negatief
-        np.full(20, 15),   # 03-08: laag
-        np.full(24, -40),  # 08-14: negatief (solar)
-        np.full(16, 60),   # 14-18: gemiddeld
-        np.full(16, 200),  # 18-22: hoog
-        np.full(8,  120),  # 22-00: dalend
-    ])
-    df = pd.DataFrame({"datetime": dates, "price_eur_mwh": prices})
+    today    = date(2026, 5, 27)
+    tomorrow = today + timedelta(days=1)
 
-    # Test 1: basis
-    sch, summ = optimize_battery_schedule(df, label="MILP Basis")
-    print(f"MILP Basis:  {summ['total_net_revenue_eur']:.3f} € | {summ['solve_time_sec']} s")
+    dates_t = pd.date_range('2026-05-27', periods=96, freq='15min', tz='UTC')
+    dates_d = pd.date_range('2026-05-28', periods=96, freq='15min', tz='UTC')
 
-    # Test 2: solar (simuleer eigen productie: piek 10u-14u)
-    solar_mw   = np.zeros(96)
-    solar_mw[32:56] = 3500  # 08u-14u: piek 3500 MW België-breed
-    solar_ser  = pd.Series(solar_mw, index=dates)
-    own_solar  = estimate_own_solar_kwh(
-        pd.DataFrame({"datetime": dates, "dayaheadforecast": solar_mw}), own_kwp=6.3
-    )
-    print(f"\nOwn solar piek: {own_solar.max():.3f} kWh/slot")
+    prices_t = np.concatenate([np.full(32,-20), np.full(32,60), np.full(32,100)])
+    prices_d = np.concatenate([np.full(8,250),  np.full(88,50)])  # hoge piek morgen
 
-    sch2, summ2 = optimize_battery_schedule_solar(df, own_solar, label="MILP+Solar")
-    print(f"MILP+Solar:  {summ2['total_net_revenue_eur']:.3f} € | grid {summ2['total_charged_grid_kwh']:.1f} kWh | solar {summ2['total_charged_solar_kwh']:.1f} kWh")
-    print(f"Verbetering: {summ2['total_net_revenue_eur'] - summ['total_net_revenue_eur']:+.3f} €")
+    df = pd.DataFrame({
+        'datetime':      list(dates_t) + list(dates_d),
+        'price_eur_mwh': list(prices_t) + list(prices_d),
+    })
+
+    print("=== MILP Basis (enkel vandaag) ===")
+    sch1, s1 = optimize_battery_schedule(
+        df[df['datetime'].dt.date == today], label='MILP Basis')
+    print(f"Revenue: {s1['revenue_execute_eur']:.3f} €  |  slots: {s1['num_slots_execute']}")
+    print(f"Eind SOC vandaag: {s1['final_soc_pct']:.1f}%")
+
+    print("\n=== MILP+DA (vandaag + morgen lookahead) ===")
+    sch2, s2 = optimize_battery_schedule(
+        df, label='MILP+DA', execute_until=today)
+    exec_slots = sch2[~sch2['is_lookahead']]
+    lah_slots  = sch2[ sch2['is_lookahead']]
+    print(f"Revenue execute: {s2['revenue_execute_eur']:.3f} €  |  execute slots: {s2['num_slots_execute']}")
+    print(f"Revenue lookahead (preview morgen): {s2['revenue_lookahead_eur']:.3f} €")
+    print(f"Eind SOC vandaag: {s2['final_soc_pct']:.1f}%  ← hoger want MILP weet van morgen's pieken")
+    print(f"Vandaag trades: {(exec_slots['charge_kwh']>0.01).sum()} ladingen, "
+          f"{(exec_slots['discharge_kwh']>0.01).sum()} ontladingen")
+    print(f"Morgen preview:  {(lah_slots['charge_kwh']>0.01).sum()} ladingen, "
+          f"{(lah_slots['discharge_kwh']>0.01).sum()} ontladingen  (niet uitvoeren!)")
