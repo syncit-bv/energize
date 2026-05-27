@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MILP Optimizer for EMS Belgium
+MILP Optimizer for EMS Belgium — v1.3
 ================================
 Drie optimalisatie-niveaus:
   1. optimize_battery_schedule()        — standaard arbitrage
