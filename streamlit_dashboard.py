@@ -800,12 +800,24 @@ if st.session_state.get("scenarios_pending"):
     scenarios = {}
     errors    = {}
 
+    def _run_milp(prices, label, execute_until, **kwargs):
+        """Roep optimizer aan; val terug op versie zonder charge_power_kw bij TypeError."""
+        try:
+            return optimize_battery_schedule(
+                prices, label=label, execute_until=execute_until, **kwargs)
+        except TypeError as te:
+            if "charge_power_kw" in str(te) or "unexpected keyword" in str(te):
+                # Oudere optimizer versie — roep zonder nieuwe parameters aan
+                safe_kwargs = {k: v for k, v in kwargs.items()
+                               if k not in ("charge_power_kw", "cap_eur_per_kw_year", "cap_min_kw")}
+                return optimize_battery_schedule(
+                    prices, label=label + " (compat)", execute_until=execute_until, **safe_kwargs)
+            raise
+
     try:
         prog.progress(10, text="▶ Scenario 1/4: MILP Basis (geselecteerde periode)…")
-        sch1, s1 = optimize_battery_schedule(
-            sim_df, label="MILP Basis",
-            execute_until=sel_end,   # geen lookahead, enkel geselecteerde periode
-            **milp_args)
+        sch1, s1 = _run_milp(sim_df, label="MILP Basis",
+                              execute_until=sel_end, **milp_args)
         scenarios["milp_basic"] = (sch1, s1)
         prog.progress(35, text="▶ Scenario 2/4: MILP + Day-ahead…")
     except Exception as e:
@@ -813,10 +825,8 @@ if st.session_state.get("scenarios_pending"):
         prog.progress(35)
 
     try:
-        sch2, s2 = optimize_battery_schedule(
-            milp_da_input, label=f"MILP+DA ({da_label})",
-            execute_until=sel_end,   # rolling horizon: morgen = lookahead
-            **milp_args)
+        sch2, s2 = _run_milp(milp_da_input, label=f"MILP+DA ({da_label})",
+                              execute_until=sel_end, **milp_args)
         scenarios["milp_da"] = (sch2, s2)
         prog.progress(65, text="▶ Scenario 3/4: MILP + Day-ahead + Solar…")
     except Exception as e:
@@ -839,10 +849,19 @@ if st.session_state.get("scenarios_pending"):
 
             solar_loaded = not solar_kwh.empty and solar_kwh.sum() > 0
             solar_label  = f"MILP+DA+Solar ({own_kwp}kWp)" if solar_loaded else "MILP+DA+Solar (geen solar data)"
-            sch3, s3 = optimize_battery_schedule_solar(
-                milp_da_input, solar_kwh, label=solar_label,
-                execute_until=sel_end,   # rolling horizon
-                **milp_args)
+            try:
+                sch3, s3 = optimize_battery_schedule_solar(
+                    milp_da_input, solar_kwh, label=solar_label,
+                    execute_until=sel_end, **milp_args)
+            except TypeError as te:
+                if "charge_power_kw" in str(te) or "unexpected keyword" in str(te):
+                    safe_kwargs = {k: v for k, v in milp_args.items()
+                                   if k not in ("charge_power_kw", "cap_eur_per_kw_year", "cap_min_kw")}
+                    sch3, s3 = optimize_battery_schedule_solar(
+                        milp_da_input, solar_kwh, label=solar_label + " (compat)",
+                        execute_until=sel_end, **safe_kwargs)
+                else:
+                    raise
             s3["solar_own_kwp"]     = own_kwp
             s3["solar_data_loaded"] = solar_loaded
             scenarios["milp_solar"] = (sch3, s3)
@@ -1168,7 +1187,7 @@ def _safe_float(val) -> float:
     except (ValueError, TypeError):
         return 0.0
 
-if st.session_state.get("scenarios"):
+if st.session_state.get("scenarios") is not None and st.session_state.get("scenario_errors") is not None:
     st.markdown("---")
     st.subheader("🔬 Scenario Vergelijking — De Kracht van EMS Optimalisatie")
     st.markdown(
@@ -1250,6 +1269,12 @@ if st.session_state.get("scenarios"):
                 "Geladen (kWh)": "—", "Ontladen (kWh)": "—",
                 "Eind SOC (%)": "—", "Verbetering": "—",
             })
+
+    # Toon eventuele fouten prominent
+    if scen_errors:
+        st.error("⚠️ **Fouten bij berekening van scenario's:**")
+        for key, err in scen_errors.items():
+            st.code(f"{key}: {err}", language="text")
 
     comp_df = pd.DataFrame(rows)
     st.dataframe(comp_df, use_container_width=True, hide_index=True)
