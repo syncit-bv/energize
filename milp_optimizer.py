@@ -303,26 +303,29 @@ def _solve_and_extract(
     final_exec_soc = round(exec_df["soc_pct"].iloc[-1], 1) if not exec_df.empty else \
                      round(result_df["soc_pct"].iloc[-1], 1)
 
+    # Actieve slots = enkel slots met effectieve laad/ontlaad actie (geen HOLD)
+    active_mask = (
+        ((result_df["charge_kwh"] > 0.01) | (result_df["discharge_kwh"] > 0.01))
+        & (~result_df["is_lookahead"])
+    )
+    n_active = int(active_mask.sum())
+
     summary = {
         "label":                   label,
         "status":                  pulp.LpStatus[status],
-        # Revenue
-        "total_net_revenue_eur":   rev_exec,    # ← alleen execute-periode (correcte vergelijking)
-        "revenue_execute_eur":     rev_exec,    # expliciet
-        "revenue_lookahead_eur":   rev_lah,     # morgen's gepland maar niet uitgevoerd
-        # Slots
+        "total_net_revenue_eur":   rev_exec,
+        "revenue_execute_eur":     rev_exec,
+        "revenue_lookahead_eur":   rev_lah,
         "num_slots":               T,
         "num_slots_execute":       n_execute,
         "num_slots_lookahead":     T - n_execute,
-        # Energie
+        "num_active_slots":        n_active,
         "total_charged_kwh":       round(exec_df["charge_kwh"].sum(), 2),
         "total_charged_grid_kwh":  round(exec_df["charge_grid_kwh"].sum(), 2),
         "total_charged_solar_kwh": round(exec_df["charge_solar_kwh"].sum(), 2),
         "total_discharged_kwh":    round(exec_df["discharge_kwh"].sum(), 2),
-        # SOC
         "final_soc_pct":           final_exec_soc,
         "final_lookahead_soc_pct": round(result_df["soc_pct"].iloc[-1], 1),
-        # Solver
         "solve_time_sec":          solve_time,
         "solver_iterations":       iterations,
         "solver_log":              solver_log,

@@ -1045,18 +1045,31 @@ if milp_ready:
                      "Laag = morgen vroeg zijn er negatieve prijzen om te laden."
             )
 
-    # Financial breakdown
+    # Financial breakdown — enkel execute-slots (niet lookahead)
     st.markdown("#### 💰 Financieel Overzicht")
-    pos_ch  = milp_df[(milp_df["charge_kwh"] > 0) & (milp_df["price_eur_mwh"] > 0)]
-    neg_ch  = milp_df[(milp_df["charge_kwh"] > 0) & (milp_df["price_eur_mwh"] <= 0)]
-    dis_df  = milp_df[milp_df["discharge_kwh"] > 0]
+    exec_df_fin = milp_df[~milp_df["is_lookahead"]] if "is_lookahead" in milp_df.columns \
+                  else milp_df[milp_df["datetime"].dt.date <= sel_end]
+    pos_ch  = exec_df_fin[(exec_df_fin["charge_kwh"] > 0) & (exec_df_fin["price_eur_mwh"] > 0)]
+    neg_ch  = exec_df_fin[(exec_df_fin["charge_kwh"] > 0) & (exec_df_fin["price_eur_mwh"] <= 0)]
+    dis_df  = exec_df_fin[exec_df_fin["discharge_kwh"] > 0]
+    cost_p  = abs(pos_ch["net_revenue_eur"].sum())
+    inc_neg = abs(neg_ch["net_revenue_eur"].sum())
+    inc_dis = dis_df["net_revenue_eur"].sum()
+    net_rev = milp_summ.get("revenue_execute_eur", milp_summ.get("total_net_revenue_eur", 0))
+    # Verifieer consistentie: componenten moeten optellen tot net_rev
+    computed = inc_dis + inc_neg - cost_p
     f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Net Revenue (MILP)",    f"{milp_summ['total_net_revenue_eur']:.2f} €",
-              delta=f"{milp_summ['total_net_revenue_eur'] - sim['cum_rev'].iloc[-1]:+.2f} vs Rule-based")
-    f2.metric("Kosten (laden, p>0)",   f"-{abs(pos_ch['net_revenue_eur'].sum()):.2f} €",
-              delta_color="inverse")
-    f3.metric("Inkomsten (p≤0)",       f"+{abs(neg_ch['net_revenue_eur'].sum()):.2f} €")
-    f4.metric("Ontlaad-inkomsten",     f"+{dis_df['net_revenue_eur'].sum():.2f} €")
+    f1.metric("Net Revenue (MILP)", f"{net_rev:.2f} €",
+              delta=f"{net_rev - sim['cum_rev'].iloc[-1]:+.2f} vs Rule-based")
+    f2.metric("Kosten (laden, p>0)",  f"-{cost_p:.2f} €",  delta_color="inverse",
+              help="Betaald voor laden van het net bij positieve prijs")
+    f3.metric("Inkomsten (p≤0)",      f"+{inc_neg:.2f} €",
+              help="Ontvangen voor laden bij negatieve/nulprijs")
+    f4.metric("Ontlaad-inkomsten",    f"+{inc_dis:.2f} €",
+              help="Verdiend door ontladen bij hoge prijs")
+    if abs(computed - net_rev) > 0.02:
+        st.caption(f"ℹ️ Check: {inc_dis:.2f} + {inc_neg:.2f} - {cost_p:.2f} = {computed:.2f} € "
+                   f"(net_rev = {net_rev:.2f} €, Δ={computed-net_rev:+.2f} € door afrondingen)")
 
     # Comparison table
     st.markdown("#### 📊 Vergelijking (geselecteerde periode)")
@@ -1146,10 +1159,11 @@ if st.session_state.get("scenarios"):
     rb_rev   = sim["cum_rev"].iloc[-1]
     rows     = []
 
+    rb_active = int((sim["action"] != "HOLD").sum())
     rows.append({
-        "Scenario":          "1️⃣ Rule-based",
-        "Slots (execute)":   rb_slots,
-        "Slots (lookahead)": 0,
+        "Scenario":           "1️⃣ Rule-based",
+        "Actieve slots":      rb_active,
+        "Slots (lookahead)":  0,
         "Net Revenue (€)":   f"{rb_rev:.2f}",
         "Geladen (kWh)":     f"{sim['energy_kwh'].sum():.1f}",
         "Ontladen (kWh)":    f"{sim[sim['action']=="DISCHARGE"]['energy_kwh'].sum():.1f}",
@@ -1166,14 +1180,14 @@ if st.session_state.get("scenarios"):
         if key in scen:
             _, s    = scen[key]
             rev     = s.get("revenue_execute_eur", s["total_net_revenue_eur"])
-            n_exec  = s.get("num_slots_execute", s["num_slots"])
-            n_lah   = s.get("num_slots_lookahead", 0)
-            rev_lah = s.get("revenue_lookahead_eur", 0)
+            n_active = s.get("num_active_slots", s.get("num_slots_execute", s["num_slots"]))
+            n_lah    = s.get("num_slots_lookahead", 0)
+            rev_lah  = s.get("revenue_lookahead_eur", 0)
             lah_note = f" (+{rev_lah:.2f}€ lookahead)" if n_lah > 0 else ""
             rows.append({
-                "Scenario":          f"{emoji[i]} {name}",
-                "Slots (execute)":   n_exec,
-                "Slots (lookahead)": n_lah,
+                "Scenario":           f"{emoji[i]} {name}",
+                "Actieve slots":      n_active,
+                "Slots (lookahead)":  n_lah,
                 "Net Revenue (€)":   f"{rev:.2f}{lah_note}",
                 "Geladen (kWh)":     f"{s['total_charged_kwh']:.1f}",
                 "Ontladen (kWh)":    f"{s['total_discharged_kwh']:.1f}",
@@ -1184,7 +1198,7 @@ if st.session_state.get("scenarios"):
         elif key in scen_errors:
             rows.append({
                 "Scenario": f"{emoji[i]} {name}",
-                "Slots (execute)": "—", "Slots (lookahead)": "—",
+                "Actieve slots": "—", "Slots (lookahead)": "—",
                 "Net Revenue (€)": "❌", "Geladen (kWh)": "—",
                 "Ontladen (kWh)": "—", "Eind SOC (%)": "—",
                 "Verbetering": "—", "Solver": scen_errors[key][:60],
