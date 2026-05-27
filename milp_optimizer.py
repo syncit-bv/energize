@@ -94,6 +94,7 @@ def optimize_battery_schedule_solar(
     efficiency: float = 0.92,
     initial_soc: float = 0.50,
     time_horizon_hours: Optional[int] = None,
+    label: str = "MILP+Solar",
 ) -> Tuple[pd.DataFrame, Dict]:
     """
     MILP met solar self-consumption model.
@@ -158,7 +159,7 @@ def optimize_battery_schedule_solar(
     # Extraheer resultaten (inclusief solar split)
     result_df, summary = _solve_and_extract(
         prob, df, T, battery_kwh, charge_grid, discharge, soc,
-        label="MILP+Solar",
+        label=label,
         extra_charge=charge_solar,
         solar_vals=solar_vals,
     )
