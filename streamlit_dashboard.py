@@ -98,6 +98,32 @@ def _set_period(start: date, end: date):
 # Page config
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="EMS Belgium MVP", layout="wide", page_icon="⚡")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets: eenmalig laden bij startup → daarna enkel via session_state
+# Correcte aanpak voor Streamlit Cloud: nooit st.secrets inline in widgets
+# ─────────────────────────────────────────────────────────────────────────────
+def _load_secret(key: str) -> str:
+    """
+    Laad een secret veilig — werkt zowel lokaal (.streamlit/secrets.toml)
+    als op Streamlit Cloud. Geeft lege string terug als key ontbreekt.
+    """
+    try:
+        val = st.secrets.get(key, "")
+        return val if isinstance(val, str) else ""
+    except Exception:
+        try:
+            return str(st.secrets[key])
+        except Exception:
+            return ""
+
+# Laad alle API keys eenmalig in session_state (nooit overschrijven als al ingevuld)
+for _key in ("entsoe_key", "em_key"):
+    if _key not in st.session_state or not st.session_state[_key]:
+        _secret_val = _load_secret(_key)
+        if _secret_val:
+            st.session_state[_key] = _secret_val
+
 st.title("⚡ EMS Belgium — Battery & Grid Intelligence Dashboard")
 st.markdown(
     "**MVP Prototype** | Belgische day-ahead prijzen | "
@@ -296,7 +322,7 @@ if ENTSOE_AVAILABLE:
         st.caption("Gratis key via transparency.entsoe.eu")
         entsoe_key = st.text_input(
             "ENTSO-E API Key", type="password",
-            value=st.session_state.get("entsoe_key") or st.secrets.get("entsoe_key", ""),
+            value=st.session_state.get("entsoe_key", ""),
             key="entsoe_key_input"
         )
         if entsoe_key:
@@ -335,7 +361,7 @@ if ELECTRICITY_MAPS_AVAILABLE:
         st.caption("Sandbox = intentioneel onnauwkeurig, beperkt tot 24u. Gebruik ENTSO-E voor backtest.")
         em_key = st.text_input(
             "EM API Key", type="password",
-            value=st.session_state.get("em_key") or st.secrets.get("em_key", ""),
+            value=st.session_state.get("em_key", ""),
             key="em_key_input"
         )
         if em_key:
@@ -494,13 +520,17 @@ if missing_dates and st.session_state.get("entsoe_key"):
         f"Ophalen via ENTSO-E…"
     )
     try:
-        client = EntsoeClient(st.session_state.entsoe_key)
-        new_df = client.get_day_ahead_prices(missing_start, missing_end)
-        if not new_df.empty:
-            _merge_prices(new_df)
-            df = st.session_state.df_prices
-            st.success(f"✅ {len(new_df)} slots geladen voor geselecteerde periode!")
-            st.rerun()
+        _auto_key = st.session_state.get("entsoe_key", "")
+        if not _auto_key:
+            st.warning("ENTSO-E API key niet gevonden. Vul die in via de sidebar.")
+        else:
+            client = EntsoeClient(_auto_key)
+            new_df = client.get_day_ahead_prices(missing_start, missing_end)
+            if not new_df.empty:
+                _merge_prices(new_df)
+                df = st.session_state.df_prices
+                st.success(f"✅ {len(new_df)} slots geladen voor geselecteerde periode!")
+                st.rerun()
     except Exception as e:
         st.warning(f"Auto-fetch mislukt: {e}. Controleer je ENTSO-E key in de sidebar.")
 
