@@ -737,22 +737,62 @@ if st.session_state.get("scenarios_pending"):
         initial_soc=init_soc, time_horizon_hours=None,
     )
 
-    # Build day-ahead extended input if available
-    da_pub        = day_ahead_published()
-    tomorrow_data = df[df["datetime"].dt.date == tomorrow]
+    # ── Bouw day-ahead input ───────────────────────────────────────────────
+    da_pub         = day_ahead_published()
+    tomorrow_data  = df[df["datetime"].dt.date == tomorrow]
     tomorrow_avail = not tomorrow_data.empty
+
+    # Probeer automatisch dag-ahead op te halen als nog niet in dataset
+    if da_pub and not tomorrow_avail and st.session_state.get("entsoe_key"):
+        try:
+            with st.spinner(f"Day-ahead voor {fdate(tomorrow)} ophalen voor MILP+DA scenario…"):
+                _da_client = EntsoeClient(st.session_state.entsoe_key)
+                _da_df = _da_client.get_day_ahead_prices(tomorrow, tomorrow + timedelta(days=1))
+                if not _da_df.empty:
+                    _merge_prices(_da_df)
+                    df = st.session_state.df_prices
+                    tomorrow_data  = df[df["datetime"].dt.date == tomorrow]
+                    tomorrow_avail = not tomorrow_data.empty
+        except Exception:
+            pass
 
     if da_pub and tomorrow_avail and sel_end >= today:
         milp_da_input = pd.concat([sim_df, tomorrow_data]).drop_duplicates(
             "datetime").sort_values("datetime").reset_index(drop=True)
-        da_label = f"Day-ahead beschikbaar ({fdate(tomorrow)})"
+        da_label    = f"{fdate(tomorrow)} day-ahead beschikbaar"
+        da_slots    = len(tomorrow_data)
+        da_extended = True
     else:
         milp_da_input = sim_df.copy()
-        da_label = "Geen day-ahead (periode-only)"
+        da_slots      = 0
+        da_extended   = False
+        if not da_pub:
+            da_label = "day-ahead nog niet gepubliceerd (vóór 13:00 CET)"
+        elif not tomorrow_avail:
+            da_label = f"{fdate(tomorrow)} niet in dataset — vul ENTSO-E key in voor auto-fetch"
+        else:
+            da_label = "periode eindigt voor vandaag"
 
-    total_steps = 4 if own_kwp > 0 else 3
+    # ── Transparantie header ───────────────────────────────────────────────
+    st.info(
+        f"**Scenario inputs:**\n"
+        f"- Scenario 1 (Rule-based): {len(sim_df)} slots ({fdate(sel_start)}→{fdate(sel_end)})\n"
+        f"- Scenario 2 (MILP Basis): zelfde {len(sim_df)} slots\n"
+        f"- Scenario 3 (MILP+DA): {len(milp_da_input)} slots "
+        + (f"(**+{da_slots} slots {fdate(tomorrow)}**)" if da_extended
+           else f"(⚠️ **zelfde als basis — {da_label}**)") + "\n"
+        f"- Scenario 4 (MILP+Solar): zelfde als scenario 3 + eigen PV ({own_kwp} kWp)"
+    )
+
+    if not da_extended:
+        st.warning(
+            f"⚠️ **Scenario 2 (MILP Basis) en Scenario 3 (MILP+DA) zijn identiek** "
+            f"omdat {da_label}.\n\n"
+            f"Voor een zinvolle vergelijking: selecteer **meerdere dagen** (bv. 'Deze Week') "
+            f"of wacht tot na 13:00 CET en laad morgen's prices via ENTSO-E."
+        )
+
     prog = st.progress(0, text="Scenario's voorbereiden…")
-
     scenarios = {}
     errors    = {}
 
@@ -776,12 +816,11 @@ if st.session_state.get("scenarios_pending"):
 
     if own_kwp > 0:
         try:
-            # Fetch solar data for scenario 4
             solar_kwh = pd.Series(dtype=float)
             if ELIA_AVAILABLE:
                 try:
-                    ec       = EliaClient()
-                    df_sol   = ec.get_solar_forecast()
+                    ec     = EliaClient()
+                    df_sol = ec.get_solar_forecast()
                     if df_sol.empty:
                         df_sol = ec.get_historical_solar(sel_start, sel_end + timedelta(days=1))
                     if not df_sol.empty:
@@ -789,9 +828,12 @@ if st.session_state.get("scenarios_pending"):
                 except Exception:
                     solar_kwh = pd.Series(dtype=float)
 
+            solar_loaded = not solar_kwh.empty and solar_kwh.sum() > 0
+            solar_label  = f"MILP+DA+Solar ({own_kwp}kWp)" if solar_loaded else "MILP+DA+Solar (geen solar data)"
             sch3, s3 = optimize_battery_schedule_solar(
-                milp_da_input, solar_kwh, label="MILP+DA+Solar", **milp_args)
-            s3["solar_own_kwp"] = own_kwp
+                milp_da_input, solar_kwh, label=solar_label, **milp_args)
+            s3["solar_own_kwp"]     = own_kwp
+            s3["solar_data_loaded"] = solar_loaded
             scenarios["milp_solar"] = (sch3, s3)
         except Exception as e:
             errors["milp_solar"] = str(e)
@@ -804,13 +846,14 @@ if st.session_state.get("scenarios_pending"):
     st.session_state.scenarios_pending = False
     st.session_state.scenario_errors   = errors
 
-    # Also store last MILP+DA as the main milp_schedule for the charts above
     if "milp_da" in scenarios:
         sch_da, summ_da = scenarios["milp_da"]
         st.session_state.milp_schedule = sch_da
         st.session_state.milp_summary  = summ_da
 
     st.rerun()
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
