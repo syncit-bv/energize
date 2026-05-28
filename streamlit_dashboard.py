@@ -890,49 +890,93 @@ if st.session_state.get("scenarios_pending"):
 # Rule-based simulation
 # ─────────────────────────────────────────────────────────────────────────────
 def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh,
-                   neg_boost, min_soc=0.10, init_soc=0.50):
+                   neg_boost, min_soc=0.10, init_soc=0.50,
+                   charge_pwr_kw: float | None = None,
+                   cap_eur_per_kw_year: float = 60.0,
+                   cap_min_kw: float = 2.5):
     """
     Rule-based batterijsimulatie — zelfde efficiency als MILP (eta = sqrt(0.92)).
 
-    max_e = AC-zijde nettransport per 15-min slot (pwr_kw × 0.25 h).
-      Laden:    batterij ontvangt  eta × max_e  kWh  (omvormerverliezen grid→bat)
-      Ontladen: batterij levert    max_e / eta  kWh  (omvormerverliezen bat→grid)
+    Capaciteitstarief (Fluvius):
+      Gebaseerd op de hoogste netto-afname (kW) van het net in een 15-min kwartier.
+      Minimum forfait: 2.5 kW → €12.50/maand.
+      Kost = max(2.5 kW, piekvraag) × €60/jaar × (n_dagen/365).
+
+    Parameters:
+      charge_pwr_kw       : max laadvermogen (afname). Standaard = pwr_kw.
+      cap_eur_per_kw_year : capaciteitstarief (default €60/kW/jaar).
+      cap_min_kw          : minimumforfait (default 2.5 kW).
     """
-    eta     = 0.92 ** 0.5            # ≈ 0.9592 — zelfde als MILP optimizer
-    soc     = init_soc               # fractie van cap_kwh (0.0–1.0)
-    max_e   = (pwr_kw * 0.25) / 1000  # MWh per slot (AC-netgrens)
-    cap_mwh = cap_kwh / 1000
-    results = []
-    cum_rev = 0.0
+    eta          = 0.92 ** 0.5
+    soc          = init_soc
+    charge_kw    = charge_pwr_kw if charge_pwr_kw is not None else pwr_kw
+    max_e_ch     = (charge_kw * 0.25) / 1000   # MWh/slot laden (AC-netgrens)
+    max_e_dis    = (pwr_kw    * 0.25) / 1000   # MWh/slot ontladen
+    cap_mwh      = cap_kwh / 1000
+    results      = []
+    cum_rev      = 0.0
+    peak_kw_seen = 0.0  # bijhouden: hoogste afnamevermogen (kW) van het net
+
     for _, row in data.iterrows():
         p = row["price_eur_mwh"]; action = "HOLD"; e_mwh = 0.0; rev = 0.0
         if p < 0 and neg_boost:
-            # max AC van net = max_e; batterij ontvangt eta × max_e
-            e = min(max_e, (1 - soc) * cap_mwh / eta)
+            e = min(max_e_ch, (1 - soc) * cap_mwh / eta)
             if e > 0.0001:
                 e_mwh = e; soc += e_mwh * eta / cap_mwh
                 rev = -e_mwh * p; action = "CHARGE (NEG)"
         elif p < ch_thresh:
-            e = min(max_e, (1 - soc) * cap_mwh / eta)
+            e = min(max_e_ch, (1 - soc) * cap_mwh / eta)
             if e > 0.0001:
                 e_mwh = e; soc += e_mwh * eta / cap_mwh
                 rev = -e_mwh * p; action = "CHARGE"
         elif p > dis_thresh:
-            # max AC naar net = max_e; batterij levert max_e / eta
-            avail_ac = min(max_e, (soc - min_soc) * cap_mwh * eta)
+            avail_ac = min(max_e_dis, (soc - min_soc) * cap_mwh * eta)
             if avail_ac > 0.0001:
                 e_mwh = avail_ac
                 soc  -= e_mwh / (eta * cap_mwh)
                 rev   = e_mwh * p; action = "DISCHARGE"
+
+        # Bijhouden van de piek-afname (enkel bij laden van net)
+        if "CHARGE" in action:
+            slot_kw = (e_mwh * 1000) / 0.25   # kWh → kW (per uur)
+            peak_kw_seen = max(peak_kw_seen, slot_kw)
+
         cum_rev += rev
         results.append({"datetime": row["datetime"], "price": p, "action": action,
                          "energy_kwh": e_mwh * 1000, "revenue": rev,
                          "soc": soc * 100, "cum_rev": cum_rev})
-    return pd.DataFrame(results)
+
+    df_result = pd.DataFrame(results)
+    n_days    = len(data) * 0.25 / 24.0
+
+    # Capaciteitstarief — gebaseerd op werkelijke piek (min. forfait)
+    peak_kw_cap  = max(cap_min_kw, peak_kw_seen)
+    cap_cost     = peak_kw_cap * cap_eur_per_kw_year * (n_days / 365.0)
+    cap_monthly  = peak_kw_cap * cap_eur_per_kw_year / 12.0
+
+    # Cumulatieve revenue na capaciteitstarief
+    if not df_result.empty:
+        df_result["cum_rev_after_cap"] = df_result["cum_rev"] - cap_cost
+
+    df_result.attrs["peak_kw"]         = round(peak_kw_cap, 3)
+    df_result.attrs["cap_cost"]        = round(cap_cost, 4)
+    df_result.attrs["cap_monthly"]     = round(cap_monthly, 2)
+    df_result.attrs["gross_rev"]       = round(df_result["cum_rev"].iloc[-1], 4) if not df_result.empty else 0
+    df_result.attrs["net_rev_after_cap"] = round(df_result["cum_rev"].iloc[-1] - cap_cost, 4) if not df_result.empty else 0
+
+    return df_result
 
 sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh,
                      discharge_thresh, negative_boost, min_soc_pct / 100,
-                     initial_soc_pct / 100)
+                     initial_soc_pct / 100,
+                     charge_pwr_kw=charge_power_kw)
+
+# Capaciteitstarief extractie uit rule-based simulatie
+rb_peak_kw   = sim.attrs.get("peak_kw", cap_peak_kw)
+rb_cap_cost  = sim.attrs.get("cap_cost", 0)
+rb_cap_mnd   = sim.attrs.get("cap_monthly", cap_monthly)
+rb_gross_rev = sim.attrs.get("gross_rev", sim["cum_rev"].iloc[-1] if not sim.empty else 0)
+rb_net_rev   = sim.attrs.get("net_rev_after_cap", rb_gross_rev)
 
 milp_df    = st.session_state.get("milp_schedule")
 milp_summ  = st.session_state.get("milp_summary") or {}
@@ -1121,7 +1165,7 @@ if milp_ready:
     milp_period = milp_df[milp_df["datetime"].dt.date <= sel_end]
     comp = pd.DataFrame({
         "Metric":     ["Net Revenue (€)", "Geladen (kWh)", "Ontladen (kWh)", "Eind SOC (%)"],
-        "Rule-based": [round(sim["cum_rev"].iloc[-1], 2),
+        "Rule-based": [round(rb_net_rev, 2),
                        round(sim["energy_kwh"].sum(), 1),
                        round(sim[sim["action"]=="DISCHARGE"]["energy_kwh"].sum(), 1),
                        round(sim["soc"].iloc[-1], 1)],
@@ -1220,7 +1264,7 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
         "Actieve slots":   rb_active,
         "Start SOC":       f"{_yest_soc:.0f}% ({_soc_src})",
         "Lookahead slots": 0,
-        "Net Revenue (€)": f"{rb_rev:.2f}",
+        "Net Revenue (€)": f"{rb_rev:.2f} (bruto {rb_gross_rev:.2f} − cap {rb_cap_cost:.2f} €)",
         "Geladen (kWh)":   f"{sim['energy_kwh'].sum():.1f}",
         "Ontladen (kWh)":  f"{sim[sim['action']=="DISCHARGE"]['energy_kwh'].sum():.1f}",
         "Eind SOC (%)":    f"{sim['soc'].iloc[-1]:.1f}",
@@ -1351,8 +1395,8 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
     # ── Cumulatieve revenue overlay ────────────────────────────────────────
     fig_rev_all = go.Figure()
     fig_rev_all.add_trace(go.Scatter(
-        x=sim["datetime"], y=sim["cum_rev"],
-        mode="lines", name="Rule-based",
+        x=sim["datetime"], y=sim["cum_rev_after_cap"],
+        mode="lines", name="Rule-based (na cap.tarief)",
         line=dict(color="royalblue", width=1.5, dash="dash")))
 
     for key, name, dash_style in [
