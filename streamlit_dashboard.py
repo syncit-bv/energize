@@ -1270,7 +1270,9 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
         "Actieve slots":   rb_active,
         "Start SOC":       f"{_yest_soc:.0f}% ({_soc_src})",
         "Lookahead slots": 0,
-        "Net Revenue (€)": f"{rb_rev:.2f} (bruto {rb_gross_rev:.2f} − cap {rb_cap_cost:.2f} €)",
+        "Bruto Rev (€)":   f"{rb_gross_rev:.2f}",
+        "Cap.tarief (€)":  f"-{rb_cap_cost:.2f}",
+        "Netto Rev (€)":   f"{rb_rev:.2f}",
         "Geladen (kWh)":   f"{sim['energy_kwh'].sum():.1f}",
         "Ontladen (kWh)":  f"{sim[sim['action']=="DISCHARGE"]['energy_kwh'].sum():.1f}",
         "Eind SOC (%)":    f"{sim['soc'].iloc[-1]:.1f}",
@@ -1284,38 +1286,42 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
     for i, (key, name) in enumerate(zip(keys, names)):
         if key in scen:
             sch_k, s = scen[key]
-            rev      = s.get("revenue_execute_eur", s["total_net_revenue_eur"])
-            n_lah    = s.get("num_slots_lookahead", 0)
-            rev_lah  = s.get("revenue_lookahead_eur", 0)
+            # Altijd netto revenue NA cap.tarief voor eerlijke vergelijking
+            rev_gross = s.get("revenue_execute_eur", s.get("total_net_revenue_eur", 0))
+            cap_cost_s= s.get("cap_tarief_period_eur", 0)
+            rev       = s.get("revenue_after_cap_eur", s.get("total_net_revenue_eur", 0))
+            n_lah     = s.get("num_slots_lookahead", 0)
+            rev_lah   = s.get("revenue_lookahead_eur", 0)
 
-            # Actieve slots direct uit schedule (niet afhankelijk van summary-versie)
-            exec_sch = sch_k[~sch_k["is_lookahead"]] if "is_lookahead" in sch_k.columns                        else sch_k[sch_k["datetime"].dt.date <= sel_end]
+            exec_sch = sch_k[~sch_k["is_lookahead"]] if "is_lookahead" in sch_k.columns \
+                       else sch_k[sch_k["datetime"].dt.date <= sel_end]
             n_active = int(((exec_sch["charge_kwh"] > 0.01) |
                             (exec_sch["discharge_kwh"] > 0.01)).sum())
 
-            # Lookahead motivatie
             lah_note = ""
             if n_lah > 0 and rev_lah != 0:
                 end_soc = s.get("final_soc_pct", 0)
-                lah_note = (f" (+{rev_lah:.2f}€ gepland morgen, "
-                           f"batterij klaar op {end_soc:.0f}%)")
+                lah_note = (f" (+{rev_lah:.2f}€ morgen, klaar op {end_soc:.0f}%)")
 
             rows.append({
-                "Scenario":        f"{emoji[i]} {name}",
-                "Actieve slots":   n_active,
-                "Start SOC":       f"{_yest_soc:.0f}% ({_soc_src})",
-                "Lookahead slots": n_lah,
-                "Net Revenue (€)": f"{rev:.2f}{lah_note}",
-                "Geladen (kWh)":   f"{s['total_charged_kwh']:.1f}",
-                "Ontladen (kWh)":  f"{s['total_discharged_kwh']:.1f}",
-                "Eind SOC (%)":    f"{s['final_soc_pct']:.1f}",
-                "Verbetering":     f"+{rev - rb_rev:.2f} €" if rev > rb_rev else f"{rev - rb_rev:.2f} €",
+                "Scenario":          f"{emoji[i]} {name}",
+                "Actieve slots":     n_active,
+                "Start SOC":         f"{_yest_soc:.0f}% ({_soc_src})",
+                "Lookahead slots":   n_lah,
+                "Bruto Rev (€)":     f"{rev_gross:.2f}",
+                "Cap.tarief (€)":    f"-{cap_cost_s:.2f}",
+                "Netto Rev (€)":     f"{rev:.2f}{lah_note}",
+                "Geladen (kWh)":     f"{s['total_charged_kwh']:.1f}",
+                "Ontladen (kWh)":    f"{s['total_discharged_kwh']:.1f}",
+                "Eind SOC (%)":      f"{s['final_soc_pct']:.1f}",
+                "Verbetering":       f"+{rev - rb_rev:.2f} €" if rev > rb_rev else f"{rev - rb_rev:.2f} €",
             })
         elif key in scen_errors:
             rows.append({
                 "Scenario": f"{emoji[i]} {name}",
                 "Actieve slots": "—", "Start SOC": "—", "Lookahead slots": "—",
-                "Net Revenue (€)": f"❌ {scen_errors[key][:40]}",
+                "Bruto Rev (€)": "—", "Cap.tarief (€)": "—",
+                "Netto Rev (€)": f"❌ {scen_errors[key][:40]}",
                 "Geladen (kWh)": "—", "Ontladen (kWh)": "—",
                 "Eind SOC (%)": "—", "Verbetering": "—",
             })
@@ -1331,17 +1337,19 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
 
     has_lookahead = any(r.get("Lookahead slots", 0) not in (0, "—") for r in rows[1:])
     st.caption(
-        f"ℹ️ **Lookbehind** (Start SOC): {_soc_src} — MILP op gisteren's prijzen bepaalt "
-        f"het optimale startpunt voor vandaag. "
-        + ("**Lookahead**: morgen's day-ahead prijzen beïnvloeden de eind-SOC keuze — "
-           "trades worden pas morgen uitgevoerd."
+        "💡 **Netto Rev** = Bruto arbitrage-opbrengst minus capaciteitstarief. "
+        "Alle scenarios berekenen het capaciteitstarief op basis van de werkelijke piek-afname. "
+        "Toekomstige kosten (groene stroomcertificaten, nettarieven, ...) "
+        "worden hier later ook in mindering gebracht. "
+        + (f"**Lookbehind**: Start SOC = {_soc_src}. " if _soc_src else "")
+        + ("**Lookahead**: morgen's prijzen beïnvloeden de eind-SOC keuze — trades worden pas morgen uitgevoerd."
            if has_lookahead else
-           "Lookahead = 0 slots (day-ahead voor morgen nog niet beschikbaar — na 13:00 CET).")
+           "Lookahead = 0 (day-ahead morgen nog niet beschikbaar — na 13:00 CET).")
     )
 
     fig_bar = go.Figure(go.Bar(
         x=[r["Scenario"] for r in rows],
-        y=[_safe_float(r["Net Revenue (€)"]) for r in rows],
+        y=[_safe_float(r.get("Netto Rev (€)", r.get("Net Revenue (€)", "0"))) for r in rows],
         marker_color=["royalblue", "#E67E22", "#27AE60", "#8E44AD"][:len(rows)],
         text=[f"{_safe_float(r['Net Revenue (€)']):.2f} €" for r in rows],
         textposition="outside",
