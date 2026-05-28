@@ -96,6 +96,51 @@ def _set_period(start: date, end: date):
     st.session_state.milp_summary  = None
     st.session_state.milp_pending  = False
 
+
+def _safe_float(val) -> float:
+    """Haal numeriek deel op uit strings zoals '13.32 (+5.20€ gepland morgen...)'."""
+    try:
+        return float(str(val).split(" ")[0])
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _to_belgian_csv(df: pd.DataFrame) -> bytes:
+    """
+    Exporteer DataFrame als Belgisch/Nederlands CSV:
+      - Decimaalteken    : komma  (3,14 i.p.v. 3.14)
+      - Lijstscheidingsteken: puntkomma (kolom1;kolom2)
+      - Datum formaat    : DD/MM/YYYY HH:MM
+      - Emoji in Type-kolom vervangen door leesbare tekst
+    Direct te openen in Excel (BE/NL regio-instellingen).
+    """
+    export = df.copy()
+
+    # Emoji → leesbare tekst
+    if "Type" in export.columns:
+        export["Type"] = export["Type"].str.replace("🟢 ", "", regex=False)\
+                                       .str.replace("🔴 ", "", regex=False)\
+                                       .str.replace("⚪", "Nul", regex=False)
+
+    # Datum naar Belgisch formaat
+    if "Tijd" in export.columns:
+        export["Tijd"] = pd.to_datetime(export["Tijd"], utc=True, errors="coerce")\
+                           .dt.tz_convert("Europe/Brussels")\
+                           .dt.strftime("%d/%m/%Y %H:%M")
+
+    # Floats: punt → komma
+    for col in export.select_dtypes(include="number").columns:
+        export[col] = export[col].apply(
+            lambda v: f"{v:.4f}".replace(".", ",") if pd.notna(v) else ""
+        )
+
+    return export.to_csv(
+        index=False,
+        sep=";",
+        encoding="utf-8-sig",   # BOM zodat Excel direct UTF-8 herkent
+    ).encode("utf-8-sig")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1241,48 +1286,6 @@ if milp_ready:
 # ─────────────────────────────────────────────────────────────────────────────
 # Scenario vergelijking (4 scenario's: Rule-based | MILP basis | +DA | +Solar)
 # ─────────────────────────────────────────────────────────────────────────────
-def _safe_float(val) -> float:
-    """Haal numeriek deel op uit strings zoals '13.32 (+5.20€ gepland morgen...)'."""
-    try:
-        return float(str(val).split(" ")[0])
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def _to_belgian_csv(df: pd.DataFrame) -> bytes:
-    """
-    Exporteer DataFrame als Belgisch/Nederlands CSV:
-      - Decimaalteken    : komma  (3,14 i.p.v. 3.14)
-      - Lijstscheidingsteken: puntkomma (kolom1;kolom2)
-      - Datum formaat    : DD/MM/YYYY HH:MM
-      - Emoji in Type-kolom vervangen door leesbare tekst
-    Direct te openen in Excel (BE/NL regio-instellingen).
-    """
-    export = df.copy()
-
-    # Emoji → leesbare tekst
-    if "Type" in export.columns:
-        export["Type"] = export["Type"].str.replace("🟢 ", "", regex=False)\
-                                       .str.replace("🔴 ", "", regex=False)\
-                                       .str.replace("⚪", "Nul", regex=False)
-
-    # Datum naar Belgisch formaat
-    if "Tijd" in export.columns:
-        export["Tijd"] = pd.to_datetime(export["Tijd"], utc=True, errors="coerce")\
-                           .dt.tz_convert("Europe/Brussels")\
-                           .dt.strftime("%d/%m/%Y %H:%M")
-
-    # Floats: punt → komma
-    for col in export.select_dtypes(include="number").columns:
-        export[col] = export[col].apply(
-            lambda v: f"{v:.4f}".replace(".", ",") if pd.notna(v) else ""
-        )
-
-    return export.to_csv(
-        index=False,
-        sep=";",
-        encoding="utf-8-sig",   # BOM zodat Excel direct UTF-8 herkent
-    ).encode("utf-8-sig")
 
 if st.session_state.get("scenarios") is not None and st.session_state.get("scenario_errors") is not None:
     st.markdown("---")
