@@ -988,13 +988,19 @@ milp_ready = milp_df is not None and bool(milp_summ)
 st.markdown("---")
 st.subheader("🔋 Simulatie Resultaten")
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Net Revenue (Rule-based)", f"{sim['cum_rev'].iloc[-1]:.2f} €")
+m1.metric(
+    "Net Revenue (Rule-based)",
+    f"{rb_net_rev:.2f} €",
+    delta=f"bruto {rb_gross_rev:.2f} € − cap {rb_cap_cost:.2f} €",
+    delta_color="off",
+    help=f"Na aftrek capaciteitstarief: piek {rb_peak_kw:.1f} kW → {rb_cap_mnd:.2f} €/mnd"
+)
 m2.metric("Totaal geladen", f"{sim['energy_kwh'].sum():.1f} kWh")
 m3.metric("Gem. SOC", f"{sim['soc'].mean():.1f} %")
 if milp_ready:
     m4.metric("Net Revenue (MILP)",
               f"{milp_summ['total_net_revenue_eur']:.2f} €",
-              delta=f"{milp_summ['total_net_revenue_eur'] - sim['cum_rev'].iloc[-1]:+.2f} € vs Rule-based")
+              delta=f"{milp_summ['total_net_revenue_eur'] - rb_net_rev:+.2f} € vs Rule-based")
 else:
     m4.metric("MILP Revenue", "—", help="Druk op '🚀 Run MILP' in de sidebar")
 
@@ -1144,7 +1150,7 @@ if milp_ready:
     rev_col1.metric(
         "Net Revenue (voor cap.tarief)",
         f"{net_rev:.2f} €",
-        delta=f"{net_rev - sim['cum_rev'].iloc[-1]:+.2f} vs Rule-based"
+        delta=f"{net_rev - rb_net_rev:+.2f} vs Rule-based"
     )
     rev_col2.metric(
         "Net Revenue (na cap.tarief)",
@@ -1251,7 +1257,7 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
     }
 
     # ── Samenvattingstabel ─────────────────────────────────────────────────
-    rb_rev     = sim["cum_rev"].iloc[-1]
+    rb_rev     = rb_net_rev  # netto na capaciteitstarief (niet sim["cum_rev"]!)
     rows       = []
 
     # Lookbehind: gisteren's optimale SOC als startpunt
