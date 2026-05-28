@@ -87,12 +87,14 @@ def day_ahead_published() -> bool:
 
 def _set_period(start: date, end: date):
     """Central helper to update period session state and clear stale MILP."""
-    st.session_state.date_start           = start
-    st.session_state.date_end             = end
-    st.session_state["date_range_picker"] = (start, end)
-    st.session_state.milp_schedule        = None
-    st.session_state.milp_summary         = None
-    st.session_state.milp_pending         = False
+    st.session_state.date_start    = start
+    st.session_state.date_end      = end
+    # Niet st.session_state["date_range_picker"] instellen —
+    # nieuwere Streamlit versies laten dit niet toe na widget-render.
+    # De date_input gebruikt value= ipv key= voor initialisatie.
+    st.session_state.milp_schedule = None
+    st.session_state.milp_summary  = None
+    st.session_state.milp_pending  = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -521,14 +523,13 @@ with c5:
 
 date_range = st.date_input(
     "Of kies eigen periode:",
+    value=(st.session_state.date_start, st.session_state.date_end),
     min_value=min_date,
     max_value=max(max_date, tomorrow),
-    key="date_range_picker",
 )
 if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-    if date_range[0] != _ds or date_range[1] != _de:
+    if date_range[0] != st.session_state.date_start or date_range[1] != st.session_state.date_end:
         _set_period(date_range[0], date_range[1])
-        # Don't rerun immediately — let auto-fetch below handle it
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auto-fetch missing data for selected period
