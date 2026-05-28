@@ -1210,6 +1210,16 @@ if milp_ready:
         "net_revenue_eur":"Slot Rev (€)","soc_pct":"SOC (%)"})
     st.dataframe(dtl, use_container_width=True, hide_index=True, height=320)
 
+    # CSV export — Belgisch formaat: komma als decimaalteken, puntkomma als scheidingsteken
+    csv_be = _to_belgian_csv(dtl)
+    st.download_button(
+        label="📥 Download als CSV (Belgisch formaat voor Excel)",
+        data=csv_be,
+        file_name=f"milp_acties_{sel_start}_{sel_end}.csv",
+        mime="text/csv",
+        help="Decimaalteken = komma, scheidingsteken = puntkomma — direct te openen in Excel (BE/NL)"
+    )
+
     if milp_summ.get("is_multiday"):
         mid_soc = milp_df[milp_df["datetime"].dt.date == today]["soc_pct"].iloc[-1] \
                   if not milp_df[milp_df["datetime"].dt.date == today].empty else None
@@ -1236,6 +1246,42 @@ def _safe_float(val) -> float:
         return float(str(val).split(" ")[0])
     except (ValueError, TypeError):
         return 0.0
+
+
+def _to_belgian_csv(df: pd.DataFrame) -> bytes:
+    """
+    Exporteer DataFrame als Belgisch/Nederlands CSV:
+      - Decimaalteken    : komma  (3,14 i.p.v. 3.14)
+      - Lijstscheidingsteken: puntkomma (kolom1;kolom2)
+      - Datum formaat    : DD/MM/YYYY HH:MM
+      - Emoji in Type-kolom vervangen door leesbare tekst
+    Direct te openen in Excel (BE/NL regio-instellingen).
+    """
+    export = df.copy()
+
+    # Emoji → leesbare tekst
+    if "Type" in export.columns:
+        export["Type"] = export["Type"].str.replace("🟢 ", "", regex=False)\
+                                       .str.replace("🔴 ", "", regex=False)\
+                                       .str.replace("⚪", "Nul", regex=False)
+
+    # Datum naar Belgisch formaat
+    if "Tijd" in export.columns:
+        export["Tijd"] = pd.to_datetime(export["Tijd"], utc=True, errors="coerce")\
+                           .dt.tz_convert("Europe/Brussels")\
+                           .dt.strftime("%d/%m/%Y %H:%M")
+
+    # Floats: punt → komma
+    for col in export.select_dtypes(include="number").columns:
+        export[col] = export[col].apply(
+            lambda v: f"{v:.4f}".replace(".", ",") if pd.notna(v) else ""
+        )
+
+    return export.to_csv(
+        index=False,
+        sep=";",
+        encoding="utf-8-sig",   # BOM zodat Excel direct UTF-8 herkent
+    ).encode("utf-8-sig")
 
 if st.session_state.get("scenarios") is not None and st.session_state.get("scenario_errors") is not None:
     st.markdown("---")
