@@ -1351,7 +1351,7 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
         x=[r["Scenario"] for r in rows],
         y=[_safe_float(r.get("Netto Rev (€)", r.get("Net Revenue (€)", "0"))) for r in rows],
         marker_color=["royalblue", "#E67E22", "#27AE60", "#8E44AD"][:len(rows)],
-        text=[f"{_safe_float(r['Net Revenue (€)']):.2f} €" for r in rows],
+        text=[f"{_safe_float(r.get('Netto Rev (€)', r.get('Net Revenue (€)', '0'))):.2f} €" for r in rows],
         textposition="outside",
     ))
     fig_bar.update_layout(
