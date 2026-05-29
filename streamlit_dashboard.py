@@ -14,6 +14,7 @@ from datetime import date, timedelta, datetime, timezone
 from milp_optimizer import (
     optimize_battery_schedule,
     optimize_battery_schedule_solar,
+    optimize_battery_schedule_wind_solar,
     estimate_own_solar_kwh,
 )
 
@@ -875,23 +876,23 @@ if st.session_state.get("scenarios_pending"):
             raise
 
     try:
-        prog.progress(10, text="▶ Scenario 1/4: MILP Basis (geselecteerde periode)…")
+        prog.progress(10, text="▶ Scenario 1/5: MILP Basis (geselecteerde periode)…")
         sch1, s1 = _run_milp(sim_df, label="MILP Basis",
                               execute_until=sel_end, **milp_args)
         scenarios["milp_basic"] = (sch1, s1)
-        prog.progress(35, text="▶ Scenario 2/4: MILP + Day-ahead…")
+        prog.progress(30, text="▶ Scenario 2/5: MILP + Day-ahead…")
     except Exception as e:
         errors["milp_basic"] = str(e)
-        prog.progress(35)
+        prog.progress(30)
 
     try:
         sch2, s2 = _run_milp(milp_da_input, label=f"MILP+DA ({da_label})",
                               execute_until=sel_end, **milp_args)
         scenarios["milp_da"] = (sch2, s2)
-        prog.progress(65, text="▶ Scenario 3/4: MILP + Day-ahead + Solar…")
+        prog.progress(55, text="▶ Scenario 3/5: MILP + Day-ahead + Solar…")
     except Exception as e:
         errors["milp_da"] = str(e)
-        prog.progress(65)
+        prog.progress(55)
 
     if own_kwp > 0:
         try:
@@ -925,12 +926,60 @@ if st.session_state.get("scenarios_pending"):
             s3["solar_own_kwp"]     = own_kwp
             s3["solar_data_loaded"] = solar_loaded
             scenarios["milp_solar"] = (sch3, s3)
+            prog.progress(80, text="▶ Scenario 4/5 klaar. Scenario 5/5: Wind + Solar…")
         except Exception as e:
             errors["milp_solar"] = str(e)
     else:
         prog.progress(90)
 
-    prog.progress(100, text="✅ Alle scenario's berekend!")
+    # ── Scenario 5: MILP + DA + Solar + Wind forecast ─────────────────────
+    if own_kwp > 0 and ELIA_AVAILABLE:
+        try:
+            prog.progress(90, text="▶ Scenario 5/5: MILP + DA + Solar + Wind forecast 🌬️☀️…")
+            # Hergebruik solar_kwh van scenario 4 (al opgehaald)
+            solar_kwh_wind = solar_kwh if 'solar_kwh' in dir() else pd.Series(dtype=float)
+
+            # Wind prijs-aanpassing ophalen
+            wind_price_adj = pd.Series(dtype=float)
+            try:
+                ec_wind   = EliaClient()
+                surplus_df= ec_wind.get_renewable_surplus_forecast()
+                if not surplus_df.empty and "price_adjustment_eur_mwh" in surplus_df.columns:
+                    wind_price_adj = pd.Series(
+                        surplus_df["price_adjustment_eur_mwh"].values,
+                        index=pd.DatetimeIndex(surplus_df["datetime"]),
+                        name="wind_price_adj",
+                    )
+            except Exception as wind_e:
+                errors["wind_fetch"] = str(wind_e)
+
+            wind_loaded  = not wind_price_adj.empty and (wind_price_adj != 0).any()
+            solar_loaded5= not solar_kwh_wind.empty and solar_kwh_wind.sum() > 0
+            wind_label   = (
+                f"MILP+DA+Solar+Wind ({own_kwp}kWp, wind adj actief)"
+                if wind_loaded else
+                f"MILP+DA+Solar+Wind ({own_kwp}kWp, geen winddata → zelfde als Solar)"
+            )
+
+            sch5, s5 = optimize_battery_schedule_wind_solar(
+                milp_da_input,
+                solar_kwh_wind,
+                wind_price_adj,
+                label=wind_label,
+                execute_until=sel_end,
+                **milp_args,
+            )
+            s5["solar_own_kwp"]      = own_kwp
+            s5["solar_data_loaded"]  = solar_loaded5
+            s5["wind_data_loaded"]   = wind_loaded
+            scenarios["milp_wind_solar"] = (sch5, s5)
+        except Exception as e:
+            errors["milp_wind_solar"] = str(e)
+    else:
+        if own_kwp == 0:
+            errors["milp_wind_solar"] = "Eigen PV-vermogen = 0 kWp — stel in via sidebar"
+
+    prog.progress(100, text="✅ Alle 5 scenario's berekend!")
 
     st.session_state.scenarios         = scenarios
     st.session_state.scenarios_pending = False
@@ -1394,9 +1443,9 @@ if st.session_state.get("scenarios") is not None and st.session_state.get("scena
         "Verbetering":     "—",
     })
 
-    emoji = ["2️⃣", "3️⃣", "4️⃣"]
-    keys  = ["milp_basic", "milp_da", "milp_solar"]
-    names = ["MILP Basis", "MILP + Day-ahead", "MILP + DA + Solar ☀️"]
+    emoji = ["2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    keys  = ["milp_basic", "milp_da", "milp_solar", "milp_wind_solar"]
+    names = ["MILP Basis", "MILP + Day-ahead", "MILP + DA + Solar ☀️", "MILP + DA + Solar + Wind 🌬️☀️"]
 
     for i, (key, name) in enumerate(zip(keys, names)):
         if key in scen:

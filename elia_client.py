@@ -301,6 +301,154 @@ class EliaClient:
 
         return result
 
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # WIND FORECAST
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_wind_forecast(self, region: str | None = None) -> pd.DataFrame:
+        """
+        Actuele wind forecast voor België (ods086).
+        Intraday + day-ahead + week-ahead, kwartierlijks vernieuwd.
+
+        Kolommen: datetime, measured, dayaheadforecast, weekaheadforecast,
+                  mostrecentforecast, region.
+
+        EMS gebruik:
+          - Hoge windforecast + hoge solarforecast = grote hernieuwbare surplus
+            → negatieve/lage dag-ahead prijzen zijn waarschijnlijk
+          - Gebruik als prijs-anticipatiesignaal VOOR 13:00 CET
+            (vóór day-ahead publicatie), zodat MILP al vroeg kan laden
+        """
+        try:
+            df = self._c.get_wind_power_estimation_and_forecast(region=region)
+            return self._standardize_wind(df)
+        except Exception as e:
+            print(f"[Elia] ods086 wind forecast fout: {e}")
+            return _empty_wind_df()
+
+    def get_historical_wind(
+        self,
+        start: dt.date | dt.datetime,
+        end:   dt.date | dt.datetime,
+        region: str | None = None,
+    ) -> pd.DataFrame:
+        """
+        Historische windproductie + forecast (ods085 / ods086).
+        Nuttig voor backtesting prijs-wind correlatie.
+        """
+        try:
+            df = self._c.get_historical_wind_power_estimation_and_forecast(
+                start=_to_dt(start), end=_to_dt(end), region=region)
+            return self._standardize_wind(df)
+        except Exception as e:
+            print(f"[Elia] historische wind fout: {e}")
+            return _empty_wind_df()
+
+    def get_renewable_surplus_forecast(
+        self,
+        target_date: dt.date | None = None,
+    ) -> pd.DataFrame:
+        """
+        Combineer wind + solar forecast tot een hernieuwbaar surplus index.
+
+        Geeft per kwartier terug:
+          datetime, solar_mw, wind_mw, surplus_mw,
+          price_adjustment_eur_mwh  (negatief bij surplus)
+
+        Prijs-correctieformule (empirisch, Belgische markt):
+          Elke 1000 MW surplus boven 2000 MW ≈ -8 €/MWh prijseffect.
+          Drempel: onder 2000 MW surplus → geen significante prijsdruk.
+
+        Gebruik in MILP:
+          Als day-ahead nog niet beschikbaar (vóór 13:00 CET):
+          → adjusted_price = base_price + price_adjustment
+          → MILP optimaliseert op gecorrigeerde verwachtingswaarden
+        """
+        solar_df = self.get_solar_forecast()
+        wind_df  = self.get_wind_forecast()
+
+        if solar_df.empty and wind_df.empty:
+            return pd.DataFrame()
+
+        # Zoek forecast kolommen
+        sol_col  = _find_col(solar_df, ["dayaheadforecast","mostrecentforecast","weekaheadforecast"])
+        wind_col = _find_col(wind_df,  ["dayaheadforecast","mostrecentforecast","weekaheadforecast"])
+
+        rows = []
+
+        if not solar_df.empty and sol_col and "datetime" in solar_df.columns:
+            for _, r in solar_df.iterrows():
+                dt_val   = r["datetime"]
+                sol_mw   = float(r.get(sol_col, 0) or 0)
+
+                # Zoek bijhorende wind op zelfde timestamp
+                wind_mw = 0.0
+                if not wind_df.empty and wind_col and "datetime" in wind_df.columns:
+                    match = wind_df[wind_df["datetime"] == dt_val]
+                    if not match.empty:
+                        wind_mw = float(match.iloc[0].get(wind_col, 0) or 0)
+
+                surplus_mw = sol_mw + wind_mw
+                # Prijs-correctie: drempel 2000 MW, -8 €/MWh per 1000 MW erboven
+                excess     = max(0.0, surplus_mw - 2000)
+                price_adj  = -(excess / 1000) * 8.0
+
+                rows.append({
+                    "datetime":               dt_val,
+                    "solar_mw":               round(sol_mw,   1),
+                    "wind_mw":                round(wind_mw,  1),
+                    "surplus_mw":             round(surplus_mw, 1),
+                    "price_adjustment_eur_mwh": round(price_adj,  2),
+                })
+
+        if not rows:
+            return pd.DataFrame()
+
+        df_out = pd.DataFrame(rows)
+        if target_date is not None:
+            df_out = df_out[df_out["datetime"].dt.date == target_date]
+
+        return df_out.sort_values("datetime").reset_index(drop=True)
+
+    def get_wind_solar_ems_advice(self) -> dict:
+        """
+        Gecombineerd wind+solar advies voor EMS.
+        Geeft aan wanneer het beste moment is om te laden op basis
+        van het verwachte hernieuwbaar surplus.
+        """
+        surplus_df = self.get_renewable_surplus_forecast()
+
+        if surplus_df.empty:
+            return {"status": "Geen data", "advice": "Standaard MILP strategie"}
+
+        tomorrow   = dt.date.today() + dt.timedelta(days=1)
+        tm_df      = surplus_df[surplus_df["datetime"].dt.date == tomorrow]
+
+        if tm_df.empty:
+            return {"status": "Geen morgen data", "advice": "Standaard MILP strategie"}
+
+        peak_surplus = tm_df["surplus_mw"].max()
+        peak_time    = tm_df.loc[tm_df["surplus_mw"].idxmax(), "datetime"]
+        best_load_windows = tm_df[tm_df["price_adjustment_eur_mwh"] < -20]                               .sort_values("price_adjustment_eur_mwh")
+
+        return {
+            "status":              "OK",
+            "tomorrow_peak_surplus_mw": round(float(peak_surplus), 0),
+            "tomorrow_peak_time":  str(peak_time)[:16],
+            "best_load_slots":     len(best_load_windows),
+            "max_price_reduction": round(float(tm_df["price_adjustment_eur_mwh"].min()), 1),
+            "advice": (
+                f"⚡ Hoog hernieuwbaar surplus morgen: {peak_surplus:.0f} MW "
+                f"om {str(peak_time)[:16]}. "
+                f"Verwachte prijsdruk: {tm_df['price_adjustment_eur_mwh'].min():.0f} €/MWh. "
+                f"{len(best_load_windows)} optimale laadkwartieren geïdentificeerd."
+                if peak_surplus > 3000 else
+                f"🌤️ Matig hernieuwbaar surplus morgen ({peak_surplus:.0f} MW). "
+                "Standaard MILP day-ahead strategie volstaat."
+            ),
+        }
+
     # ─────────────────────────────────────────────────────────────────────────
     # Interne helpers
     # ─────────────────────────────────────────────────────────────────────────
@@ -348,6 +496,20 @@ class EliaClient:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         return df.sort_values("datetime").reset_index(drop=True) if "datetime" in df.columns else df
 
+    def _standardize_wind(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normaliseer ruwe Elia wind DataFrame (zelfde structuur als solar)."""
+        if df.empty:
+            return _empty_wind_df()
+        if df.index.name == "datetime" or isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+        for col in df.select_dtypes(include="object").columns:
+            if col != "datetime" and "region" not in col.lower():
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.sort_values("datetime").reset_index(drop=True) \
+               if "datetime" in df.columns else df
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -375,7 +537,13 @@ def _empty_imbalance_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["datetime","nrv_mw","si_mw","mip_eur_mwh",
                                    "mdp_eur_mwh","alpha","cip_eur_mwh","cdp_eur_mwh"])
 
+_empty_wind_df.__doc__ = 'Empty wind DataFrame'
+
 def _empty_solar_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=["datetime","measured","dayaheadforecast",
+                                   "weekaheadforecast","mostrecentforecast","region"])
+
+def _empty_wind_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["datetime","measured","dayaheadforecast",
                                    "weekaheadforecast","mostrecentforecast","region"])
 

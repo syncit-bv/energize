@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MILP Optimizer for EMS Belgium — v1.6
+MILP Optimizer for EMS Belgium — v1.7
 ======================================
 Drie optimalisatie-niveaus:
   1. optimize_battery_schedule()        — standaard arbitrage + capaciteitstarief
@@ -213,6 +213,119 @@ def optimize_battery_schedule_solar(
     return result_df, summary
 
 
+def optimize_battery_schedule_wind_solar(
+    prices_df: pd.DataFrame,
+    solar_kwh_per_slot: pd.Series,
+    wind_price_adj_per_slot: pd.Series,
+    battery_kwh: float = 10.0,
+    max_power_kw: float = 5.0,
+    charge_power_kw: Optional[float] = None,
+    min_soc: float = 0.10,
+    min_end_soc: float = 0.20,
+    efficiency: float = 0.92,
+    initial_soc: float = 0.50,
+    time_horizon_hours: Optional[int] = None,
+    label: str = "MILP+Solar+Wind",
+    execute_until: Optional[date] = None,
+    cap_eur_per_kw_year: float = CAP_EUR_PER_KW_YEAR,
+    cap_min_kw: float = CAP_MIN_KW,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    MILP met solar self-consumption + wind prijssignaal + capaciteitstarief.
+
+    Wind integratie:
+      wind_price_adj_per_slot (pd.Series, €/MWh per slot):
+        Negatieve waarden = verwacht lagere prijs door wind/solar surplus.
+        MILP optimaliseert op gecorrigeerde prijs:
+          effective_price[t] = price[t] + wind_adj[t]
+
+        Dit maakt MILP proactief: bij hoge wind+solar verwachting laadt hij
+        eerder (ook al is de day-ahead prijs nog niet negatief), omdat hij
+        anticipeert op de werkelijke marktprijs.
+
+      Nota: wind_adj wordt enkel toegepast op de OBJECTIVE (prijs-motivatie),
+            NIET op de revenue berekening (die gebruikt de werkelijke day-ahead
+            prijs). Dit is de correcte MPC-aanpak.
+    """
+    df = _select_slots(prices_df, time_horizon_hours)
+    if df.empty:
+        raise ValueError("Geen prijsdata.")
+
+    discharge_kw = max_power_kw
+    charge_kw    = min(charge_power_kw if charge_power_kw is not None else max_power_kw,
+                       discharge_kw)
+
+    T      = len(df)
+    dt_h   = 0.25
+    eta    = efficiency ** 0.5
+    n_days = T * dt_h / 24.0
+    n_months = n_days / 30.44
+
+    if execute_until is not None:
+        exec_mask = pd.to_datetime(df["datetime"]).dt.date <= execute_until
+    else:
+        exec_mask = pd.Series([True] * T)
+    n_execute = int(exec_mask.sum())
+
+    solar_vals    = _align_solar(solar_kwh_per_slot, df)
+    wind_adj_vals = _align_wind_adj(wind_price_adj_per_slot, df)
+
+    prob          = pulp.LpProblem("Battery_Wind_Solar_MILP", pulp.LpMaximize)
+    charge_grid   = pulp.LpVariable.dicts("CG", range(T), lowBound=0, cat="Continuous")
+    charge_solar  = pulp.LpVariable.dicts("CS", range(T), lowBound=0, cat="Continuous")
+    discharge     = pulp.LpVariable.dicts("D",  range(T), lowBound=0, cat="Continuous")
+    soc           = pulp.LpVariable.dicts("S",  range(T+1),
+                                          lowBound=min_soc * battery_kwh,
+                                          upBound=battery_kwh, cat="Continuous")
+    peak_charge   = pulp.LpVariable("PeakCharge", lowBound=cap_min_kw,
+                                    upBound=charge_kw, cat="Continuous")
+
+    cap_cost = peak_charge * (cap_eur_per_kw_year / 12.0) * n_months
+
+    # Objectief: arbitrage op effectieve prijs (day-ahead + windcorrectie)
+    # wind_adj enkel in objective (motivatie), NIET in revenue berekening
+    prob += (
+        pulp.lpSum(
+            discharge[t]     * (df.iloc[t]["price_eur_mwh"] + wind_adj_vals[t]) / 1000
+            - charge_grid[t] * (df.iloc[t]["price_eur_mwh"] + wind_adj_vals[t]) / 1000
+            for t in range(T)
+        ) - cap_cost,
+        "Revenue_Wind_Solar",
+    )
+
+    prob += soc[0] == initial_soc * battery_kwh, "Init_SOC"
+    prob += soc[T] >= min_end_soc * battery_kwh, "Min_End_SOC"
+
+    max_e_discharge = discharge_kw * dt_h
+
+    for t in range(T):
+        solar_avail = float(solar_vals[t])
+        prob += (soc[t+1] == soc[t]
+                 + eta * (charge_grid[t] + charge_solar[t])
+                 - discharge[t] / eta), f"Dyn_{t}"
+        prob += charge_grid[t]  <= peak_charge * dt_h, f"CG_{t}"
+        prob += charge_solar[t] <= solar_avail,          f"CS_{t}"
+        prob += charge_grid[t] + charge_solar[t] <= max_e_discharge, f"Cmax_{t}"
+        prob += discharge[t]   <= max_e_discharge,                    f"Dmax_{t}"
+
+    result_df, summary = _solve_and_extract(
+        prob, df, T, battery_kwh, charge_grid, discharge, soc,
+        label=label, extra_charge=charge_solar, solar_vals=solar_vals,
+        exec_mask=exec_mask, n_execute=n_execute,
+        peak_charge_var=peak_charge,
+        discharge_kw=discharge_kw, charge_kw=charge_kw,
+        cap_eur_per_kw_year=cap_eur_per_kw_year, cap_min_kw=cap_min_kw,
+        n_days=n_days,
+    )
+
+    # Extra info wind
+    total_wind_adj = sum(wind_adj_vals[t] for t in range(T) if wind_adj_vals[t] < 0)
+    summary["wind_price_adj_total_eur_mwh"] = round(total_wind_adj, 1)
+    summary["wind_adjusted_slots"] = sum(1 for v in wind_adj_vals if v < -0.5)
+
+    return result_df, summary
+
+
 def estimate_own_solar_kwh(
     solar_df: pd.DataFrame,
     own_kwp: float = 6.3,
@@ -250,6 +363,26 @@ def _align_solar(solar_series, prices_df):
         if price_idx.tz is None: price_idx = price_idx.tz_localize("UTC")
         return solar_indexed.reindex(price_idx, method="nearest",
                                      tolerance="20min").fillna(0.0).clip(lower=0).tolist()
+    except Exception:
+        return [0.0] * len(prices_df)
+
+def _align_wind_adj(wind_adj_series: pd.Series, prices_df: pd.DataFrame) -> list:
+    """
+    Lijn wind prijs-aanpassingen (€/MWh) uit op de prijs-tijdsas.
+    Geeft lijst van floats terug, één per slot. Standaard 0.0 als geen data.
+    """
+    if wind_adj_series is None or wind_adj_series.empty:
+        return [0.0] * len(prices_df)
+    try:
+        idx = pd.DatetimeIndex(wind_adj_series.index)
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        adj_indexed = pd.Series(wind_adj_series.values, index=idx)
+        price_idx   = pd.DatetimeIndex(prices_df["datetime"])
+        if price_idx.tz is None:
+            price_idx = price_idx.tz_localize("UTC")
+        aligned = adj_indexed.reindex(price_idx, method="nearest", tolerance="20min").fillna(0.0)
+        return aligned.tolist()
     except Exception:
         return [0.0] * len(prices_df)
 
