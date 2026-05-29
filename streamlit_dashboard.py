@@ -16,6 +16,7 @@ from milp_optimizer import (
     optimize_battery_schedule_solar,
     optimize_battery_schedule_wind_solar,
     estimate_own_solar_kwh,
+    battery_sizing_analysis,
 )
 
 try:
@@ -2024,6 +2025,185 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
                                 st.warning("Geen historische winddata.")
                         except Exception as e:
                             st.error(f"Wind historisch fout: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Battery Sizing Advisor
+# ─────────────────────────────────────────────────────────────────────────────
+with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", expanded=False):
+    st.markdown(
+        "**Welke batterijgrootte geeft de beste rendabiliteit op jouw energieprofiel?**\n\n"
+        "De MILP-optimizer draait voor meerdere batterijgroottes op jouw geladen prijsdata. "
+        "Voor elke grootte berekent hij de optimale arbitrage-opbrengst, capaciteitstarief en "
+        "kapitaalkost — zodat je de echte netto winst en terugverdientijd per grootte vergelijkt.\n\n"
+        "⚠️ *Dit is een MILP-sweep en neemt enige rekentijd (±30 seconden voor 8 groottes).*"
+    )
+
+    sz_c1, sz_c2, sz_c3 = st.columns(3)
+    with sz_c1:
+        capex_kwh = st.number_input(
+            "CAPEX batterij (€/kWh geïnstalleerd)", 200, 1000, 500, 50,
+            help="Totale installatiekost per kWh capaciteit. LFP 2026: ±€400-600/kWh.")
+        lifespan  = st.number_input(
+            "Verwachte levensduur (jaar)", 5, 25, 12, 1,
+            help="LFP-batterijen halen typisch 10-15 jaar bij 1 cyclus/dag.")
+    with sz_c2:
+        sizes_min = st.number_input("Min. capaciteit sweep (kWh)", 2, 20, 5, 1)
+        sizes_max = st.number_input("Max. capaciteit sweep (kWh)", 5, 100, 30, 5)
+        sizes_step= st.number_input("Stap (kWh)", 1, 10, 5, 1)
+    with sz_c3:
+        use_solar_sz  = st.checkbox("Solar meenemen in sweep", value=own_kwp > 0,
+                                     help="Gebruikt eigen PV-vermogen van de sidebar")
+        sz_inverter   = st.number_input(
+            "Omvormervermogen sweep (kW)", 2.0, 11.0, float(discharge_power_kw), 0.5,
+            help="Max. laad/ontlaadvermogen voor de sizing sweep.")
+
+    if not df.empty and st.button(
+            "🚀 Start Battery Sizing Analyse", type="primary",
+            key="btn_sizing", use_container_width=True):
+
+        battery_sizes = list(range(int(sizes_min), int(sizes_max) + 1, int(sizes_step)))
+        if not battery_sizes:
+            st.error("Ongeldige sweep-instellingen.")
+        else:
+            with st.spinner(f"MILP sweep over {len(battery_sizes)} groottes "
+                            f"({sizes_min}–{sizes_max} kWh, stap {sizes_step} kWh)…"):
+                try:
+                    # Solar data ophalen indien gevraagd
+                    solar_sz = None
+                    if use_solar_sz and ELIA_AVAILABLE and own_kwp > 0:
+                        try:
+                            ec_sz   = EliaClient()
+                            df_sol_sz = ec_sz.get_solar_forecast()
+                            if df_sol_sz.empty:
+                                df_sol_sz = ec_sz.get_historical_solar(sel_start, sel_end)
+                            if not df_sol_sz.empty:
+                                solar_sz = estimate_own_solar_kwh(df_sol_sz, own_kwp=own_kwp)
+                        except Exception:
+                            solar_sz = None
+
+                    sz_results = battery_sizing_analysis(
+                        sim_df,
+                        battery_sizes_kwh=[float(s) for s in battery_sizes],
+                        max_power_kw=float(sz_inverter),
+                        min_soc=min_soc_pct / 100,
+                        min_end_soc=min_end_soc_pct / 100,
+                        initial_soc=initial_soc_pct / 100,
+                        capex_per_kwh=float(capex_kwh),
+                        lifespan_years=float(lifespan),
+                        solar_kwh_per_slot=solar_sz,
+                    )
+                    st.session_state["sizing_results"] = sz_results
+                except Exception as e:
+                    st.error(f"Sizing analyse fout: {e}")
+
+    # Resultaten tonen
+    if "sizing_results" in st.session_state and st.session_state["sizing_results"] is not None:
+        sr = st.session_state["sizing_results"]
+        valid = sr[sr["_netto_year"] > -900].copy()
+
+        if not valid.empty:
+            # Optimaal punt
+            best_idx   = valid["_netto_year"].idxmax()
+            best_kwh   = valid.loc[best_idx, "Capaciteit (kWh)"]
+            best_netto = valid.loc[best_idx, "_netto_year"]
+            best_irr   = valid.loc[best_idx, "_irr"]
+            best_tv    = valid.loc[best_idx, "_terugverd"]
+
+            # KPI banner
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("🏆 Optimale grootte",  f"{best_kwh:.0f} kWh",
+                      help="Hoogste netto jaarwinst na CAPEX en capaciteitstarief")
+            k2.metric("Netto winst/jaar",      f"{best_netto:+.0f} €",
+                      help="Arbitrage-opbrengst − CAPEX/jaar − capaciteitstarief")
+            k3.metric("Terugverdientijd",      f"{best_tv:.1f} jaar")
+            k4.metric("IRR",                   f"{best_irr:.1f} %",
+                      help="Interne rendabiliteitvoet (revenue / totale CAPEX)")
+
+            # Hoofdgrafiek: gestapelde componenten
+            import plotly.graph_objects as go_sz
+            fig_sz = go_sz.Figure()
+
+            fig_sz.add_trace(go_sz.Bar(
+                x=valid["Capaciteit (kWh)"], y=valid["_rev_year"],
+                name="Arbitrage-opbrengst (€/jr)", marker_color="#27AE60", opacity=0.85))
+            fig_sz.add_trace(go_sz.Bar(
+                x=valid["Capaciteit (kWh)"], y=-valid["_capex_year"],
+                name="CAPEX/jaar (€)", marker_color="#E74C3C", opacity=0.85))
+            fig_sz.add_trace(go_sz.Bar(
+                x=valid["Capaciteit (kWh)"], y=-valid["_cap_tar_year"],
+                name="Cap.tarief/jaar (€)", marker_color="#E67E22", opacity=0.85))
+
+            # Netto als lijn
+            fig_sz.add_trace(go_sz.Scatter(
+                x=valid["Capaciteit (kWh)"], y=valid["_netto_year"],
+                name="Netto winst/jaar (€)",
+                line=dict(color="white", width=3),
+                mode="lines+markers",
+                marker=dict(size=8)))
+
+            # Markeer optimum
+            fig_sz.add_vline(
+                x=best_kwh, line_dash="dash", line_color="#F1C40F",
+                annotation_text=f"Optimum: {best_kwh:.0f} kWh",
+                annotation_position="top right")
+
+            fig_sz.update_layout(
+                title=f"Battery Sizing Analyse — {capex_kwh}€/kWh CAPEX, {lifespan}j levensduur",
+                xaxis_title="Batterijcapaciteit (kWh)",
+                yaxis_title="€ per jaar",
+                barmode="relative",
+                legend=dict(x=0, y=1.12, orientation="h"),
+                xaxis=dict(dtick=sizes_step),
+            )
+            st.plotly_chart(fig_sz, use_container_width=True)
+
+            # IRR + terugverdientijd grafiek
+            fig_irr = go_sz.Figure()
+            fig_irr.add_trace(go_sz.Scatter(
+                x=valid["Capaciteit (kWh)"], y=valid["_irr"],
+                name="IRR (%)", line=dict(color="#3498DB", width=2),
+                mode="lines+markers", yaxis="y"))
+            fig_irr.add_trace(go_sz.Scatter(
+                x=valid["Capaciteit (kWh)"], y=valid["_terugverd"].clip(upper=30),
+                name="Terugverdientijd (jaar)",
+                line=dict(color="#E67E22", width=2, dash="dot"),
+                mode="lines+markers", yaxis="y2"))
+            fig_irr.update_layout(
+                title="IRR en Terugverdientijd per Batterijgrootte",
+                xaxis_title="Capaciteit (kWh)",
+                yaxis=dict(title="IRR (%)"),
+                yaxis2=dict(title="Terugverdientijd (jaar)", overlaying="y",
+                            side="right", range=[0, 30]),
+                legend=dict(x=0, y=1.12, orientation="h"),
+                xaxis=dict(dtick=sizes_step),
+            )
+            st.plotly_chart(fig_irr, use_container_width=True)
+
+            # Detailtabel
+            display_cols = ["Capaciteit (kWh)", "Rev. jaar (€)", "CAPEX jaar (€)",
+                            "Cap.tarief jaar (€)", "Netto winst jaar (€)",
+                            "Terugverdientijd (j)", "IRR (%)", "MILP laadpiek (kW)"]
+            display_cols = [c for c in display_cols if c in sr.columns]
+            st.dataframe(sr[display_cols], use_container_width=True, hide_index=True,
+                         column_config={
+                             "Netto winst jaar (€)": st.column_config.NumberColumn(format="%.0f"),
+                             "IRR (%)":               st.column_config.NumberColumn(format="%.1f"),
+                             "Terugverdientijd (j)":  st.column_config.NumberColumn(format="%.1f"),
+                         })
+
+            st.caption(
+                f"ℹ️ **Gebaseerd op {len(sim_df)/4:.0f}u ({len(sim_df)*0.25/24:.0f} dagen) "
+                f"echte prijsdata**, geëxtrapoleerd naar 1 jaar. "
+                f"Rekening gehouden met: MILP-optimale arbitrage, capaciteitstarief, "
+                f"{'solar self-consumption ('+str(own_kwp)+' kWp), ' if use_solar_sz and own_kwp > 0 else ''}"
+                f"CAPEX €{capex_kwh}/kWh over {lifespan} jaar. "
+                f"Exclusief: onderhoudskosten, verzekering, netaansluitingskosten, "
+                f"eventuele subsidies."
+            )
+        else:
+            st.warning("Geen geldige resultaten — controleer de ingevoerde parameters.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Intraday Pricing (placeholder — EPEX SPOT data niet gratis beschikbaar)

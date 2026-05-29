@@ -505,6 +505,130 @@ def _parse_iterations(log: str) -> int:
     return 0
 
 
+def battery_sizing_analysis(
+    prices_df: pd.DataFrame,
+    battery_sizes_kwh: list = None,
+    max_power_kw: float = 5.0,
+    min_soc: float = 0.10,
+    min_end_soc: float = 0.20,
+    initial_soc: float = 0.50,
+    capex_per_kwh: float = 500.0,
+    lifespan_years: float = 12.0,
+    cap_eur_per_kw_year: float = CAP_EUR_PER_KW_YEAR,
+    cap_min_kw: float = CAP_MIN_KW,
+    solar_kwh_per_slot: "pd.Series | None" = None,
+    wind_price_adj_per_slot: "pd.Series | None" = None,
+) -> "pd.DataFrame":
+    """
+    Sweep over batterijgroottes en bereken MILP-optimale rendabiliteit per grootte.
+
+    Voor elke grootte in battery_sizes_kwh:
+      - Voer MILP-optimalisatie uit op prices_df
+      - Bereken jaarlijkse arbitrage-opbrengst (geëxtrapoleerd naar 1 jaar)
+      - Bereken CAPEX-kost, capaciteitstarief, netto-opbrengst
+      - Bereken terugverdientijd en IRR
+
+    Returns:
+      DataFrame met kolommen:
+        battery_kwh, rev_period_eur, rev_year_eur, capex_year_eur,
+        cap_tarief_year_eur, netto_year_eur, terugverdientijd_jaar,
+        irr_pct, peak_charge_kw, solver_status
+    """
+    import pandas as _pd
+
+    if battery_sizes_kwh is None:
+        battery_sizes_kwh = [5, 7.5, 10, 12.5, 15, 20, 25, 30]
+
+    n_days = len(prices_df) * 0.25 / 24.0
+    if n_days < 1:
+        raise ValueError("Minimaal 1 dag prijsdata nodig voor sizing analyse.")
+
+    rows = []
+    for kwh in battery_sizes_kwh:
+        try:
+            # Kies de juiste optimizer op basis van beschikbare data
+            if wind_price_adj_per_slot is not None and solar_kwh_per_slot is not None:
+                sch, s = optimize_battery_schedule_wind_solar(
+                    prices_df,
+                    solar_kwh_per_slot if solar_kwh_per_slot is not None
+                        else _pd.Series(dtype=float),
+                    wind_price_adj_per_slot,
+                    battery_kwh=kwh,
+                    max_power_kw=max_power_kw,
+                    charge_power_kw=max_power_kw,
+                    min_soc=min_soc, min_end_soc=min_end_soc,
+                    initial_soc=initial_soc,
+                    cap_eur_per_kw_year=cap_eur_per_kw_year,
+                    cap_min_kw=cap_min_kw,
+                )
+            elif solar_kwh_per_slot is not None and not solar_kwh_per_slot.empty:
+                sch, s = optimize_battery_schedule_solar(
+                    prices_df, solar_kwh_per_slot,
+                    battery_kwh=kwh, max_power_kw=max_power_kw,
+                    charge_power_kw=max_power_kw,
+                    min_soc=min_soc, min_end_soc=min_end_soc,
+                    initial_soc=initial_soc,
+                    cap_eur_per_kw_year=cap_eur_per_kw_year,
+                    cap_min_kw=cap_min_kw,
+                )
+            else:
+                sch, s = optimize_battery_schedule(
+                    prices_df,
+                    battery_kwh=kwh, max_power_kw=max_power_kw,
+                    charge_power_kw=max_power_kw,
+                    min_soc=min_soc, min_end_soc=min_end_soc,
+                    initial_soc=initial_soc,
+                    cap_eur_per_kw_year=cap_eur_per_kw_year,
+                    cap_min_kw=cap_min_kw,
+                )
+
+            rev_period   = s.get("revenue_after_cap_eur",  s.get("total_net_revenue_eur", 0))
+            cap_cost_per = s.get("cap_tarief_period_eur",  0)
+            peak_kw      = s.get("peak_charge_kw",         cap_min_kw)
+
+            # Extrapoleer naar jaarlijkse waarden
+            scale        = 365.0 / max(n_days, 1)
+            rev_year     = rev_period  * scale
+            cap_tar_year = cap_cost_per * scale
+
+            # Financiële analyse
+            capex_total  = kwh * capex_per_kwh
+            capex_year   = capex_total / lifespan_years
+            netto_year   = rev_year - capex_year   # cap_tarief zit al in rev_year
+            irr_pct      = (rev_year / capex_total) * 100 if capex_total > 0 else 0
+            terugverd    = capex_total / rev_year if rev_year > 0 else 999
+
+            rows.append({
+                "Capaciteit (kWh)":      kwh,
+                "Rev. periode (€)":      round(rev_period, 2),
+                "Rev. jaar (€)":         round(rev_year, 0),
+                "CAPEX jaar (€)":        round(capex_year, 0),
+                "Cap.tarief jaar (€)":   round(cap_tar_year, 0),
+                "Netto winst jaar (€)":  round(netto_year, 0),
+                "Terugverdientijd (j)":  round(terugverd, 1),
+                "IRR (%)":               round(irr_pct, 1),
+                "MILP laadpiek (kW)":    round(peak_kw, 2),
+                "Solver status":         s.get("status", "—"),
+                # interne waarden voor grafieken
+                "_rev_year":             rev_year,
+                "_capex_year":           capex_year,
+                "_cap_tar_year":         cap_tar_year,
+                "_netto_year":           netto_year,
+                "_irr":                  irr_pct,
+                "_terugverd":            terugverd,
+            })
+        except Exception as e:
+            rows.append({
+                "Capaciteit (kWh)": kwh,
+                "Rev. periode (€)": None,
+                "Solver status": f"Fout: {str(e)[:60]}",
+                "_rev_year": 0, "_capex_year": 0, "_cap_tar_year": 0,
+                "_netto_year": -999, "_irr": 0, "_terugverd": 999,
+            })
+
+    return _pd.DataFrame(rows)
+
+
 if __name__ == "__main__":
     import numpy as np
     from datetime import date, timedelta
