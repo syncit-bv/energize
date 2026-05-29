@@ -207,8 +207,13 @@ discharge_power_kw = st.sidebar.slider(
     help="Maximaal vermogen bij injectie op het net. Geen capaciteitstarief van toepassing."
 )
 charge_power_kw = st.sidebar.slider(
-    "Max laadvermogen / afname (kW)", 1.0, 11.0, 2.5, 0.5,
-    help="Maximaal afnamevermogen van het net. Bepaalt het capaciteitstarief (Fluvius)."
+    "Max laadvermogen / afname (kW)", 1.0, 11.0, 5.0, 0.5,
+    help=(
+        "Fysische bovengrens van de omvormer bij afname van het net (= omvormerrating).\n\n"
+        "MILP kiest zelf de optimale laadpiek tussen het forfait-minimum (2.5 kW) "
+        "en deze bovengrens. Hogere piek = sneller laden maar meer capaciteitstarief.\n\n"
+        "Stel dit in op de werkelijke capaciteit van jouw omvormer, niet op het forfait."
+    )
 )
 # Backwards-compat: max_power_kw = discharge (gebruikt in rule-based + MILP)
 max_power_kw = discharge_power_kw

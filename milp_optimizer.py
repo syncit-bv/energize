@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MILP Optimizer for EMS Belgium — v1.5
+MILP Optimizer for EMS Belgium — v1.6
 ======================================
 Drie optimalisatie-niveaus:
   1. optimize_battery_schedule()        — standaard arbitrage + capaciteitstarief
@@ -63,7 +63,12 @@ def optimize_battery_schedule(
     T   = len(df)
     dt  = 0.25
     eta = efficiency ** 0.5
-    n_days = T * dt / 24.0
+    n_days   = T * dt / 24.0
+    # Capaciteitstarief: Belgisch systeem rekent per MAAND (niet per jaar)
+    # Kost voor deze periode = peak_kw × (€60/12) × n_maanden
+    # Meer maanden = hogere absolute kost, maar MARGINALE kost per extra kW
+    # blijft constant: €5/kW/maand → eerlijkere MILP-beslissing
+    n_months = n_days / 30.44  # gemiddelde maandlengte
 
     if execute_until is not None:
         exec_mask = pd.to_datetime(df["datetime"]).dt.date <= execute_until
@@ -86,8 +91,8 @@ def optimize_battery_schedule(
         cat="Continuous",
     )
 
-    # Objectief: arbitrage-opbrengst minus capaciteitstarifkost
-    cap_cost = peak_charge * cap_eur_per_kw_year * (n_days / 365.0)
+    # Objectief: arbitrage-opbrengst minus capaciteitstarifkost (per maand)
+    cap_cost = peak_charge * (cap_eur_per_kw_year / 12.0) * n_months
     prob += (
         pulp.lpSum(
             discharge[t] * df.iloc[t]["price_eur_mwh"] / 1000
@@ -147,7 +152,8 @@ def optimize_battery_schedule_solar(
     T   = len(df)
     dt  = 0.25
     eta = efficiency ** 0.5
-    n_days = T * dt / 24.0
+    n_days   = T * dt / 24.0
+    n_months = n_days / 30.44
 
     if execute_until is not None:
         exec_mask = pd.to_datetime(df["datetime"]).dt.date <= execute_until
@@ -167,7 +173,7 @@ def optimize_battery_schedule_solar(
     peak_charge   = pulp.LpVariable("PeakCharge", lowBound=cap_min_kw,
                                     upBound=charge_kw, cat="Continuous")
 
-    cap_cost = peak_charge * cap_eur_per_kw_year * (n_days / 365.0)
+    cap_cost = peak_charge * (cap_eur_per_kw_year / 12.0) * n_months
     # Solar laden telt NIET mee voor capaciteitstarief (eigen productie, geen nettransport)
     prob += (
         pulp.lpSum(
@@ -277,7 +283,8 @@ def _solve_and_extract(
     # Gekozen piek door MILP
     peak_kw_chosen = pulp.value(peak_charge_var) if peak_charge_var else charge_kw
     peak_kw_chosen = max(float(peak_kw_chosen or cap_min_kw), cap_min_kw)
-    cap_cost_total = peak_kw_chosen * cap_eur_per_kw_year * (n_days / 365.0)
+    n_months       = n_days / 30.44
+    cap_cost_total = peak_kw_chosen * (cap_eur_per_kw_year / 12.0) * n_months
     cap_cost_monthly_equiv = peak_kw_chosen * cap_eur_per_kw_year / 12.0
 
     results = []
