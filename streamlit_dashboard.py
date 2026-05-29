@@ -1250,18 +1250,78 @@ if milp_ready:
     fig_ma.update_layout(title="MILP Optimale Acties", xaxis_title="Tijd", yaxis_title="€/MWh")
     st.plotly_chart(fig_ma, use_container_width=True)
 
-    # Action table
-    am = (milp_df["charge_kwh"] > 0.01) | (milp_df["discharge_kwh"] > 0.01)
+    # ── MILP Optimale Acties tabel ────────────────────────────────────────────
+    am  = (milp_df["charge_kwh"] > 0.01) | (milp_df["discharge_kwh"] > 0.01)
     dtl = milp_df[am][["datetime","price_eur_mwh","charge_kwh","discharge_kwh",
-                         "net_revenue_eur","soc_pct"]].copy()
-    dtl["Type"] = dtl["net_revenue_eur"].apply(
-        lambda x: "🟢 Inkomsten" if x > 0 else ("🔴 Kosten" if x < 0 else "⚪"))
-    dtl = dtl.rename(columns={"datetime":"Tijd","price_eur_mwh":"Prijs (€/MWh)",
-        "charge_kwh":"Laden (kWh)","discharge_kwh":"Ontladen (kWh)",
-        "net_revenue_eur":"Slot Rev (€)","soc_pct":"SOC (%)"})
-    st.dataframe(dtl, use_container_width=True, hide_index=True, height=320)
+                        "charge_solar_kwh","net_revenue_eur","soc_pct","is_lookahead"]].copy()
 
-    # CSV export — Belgisch formaat: komma als decimaalteken, puntkomma als scheidingsteken
+    # Vermogen (kW) = kWh per 15-min slot × 4
+    dtl["Laadvermogen (kW)"]    = (dtl["charge_kwh"] - dtl.get("charge_solar_kwh", 0)) * 4
+    dtl["Injectievermogen (kW)"]= dtl["discharge_kwh"] * 4
+
+    # Cumulatieve totalen
+    dtl["Cum. geladen (kWh)"]   = dtl["charge_kwh"].cumsum()
+    dtl["Cum. ontladen (kWh)"]  = dtl["discharge_kwh"].cumsum()
+
+    # Revenue per kWh (voor ontladen)
+    dtl["Rev/kWh (€)"] = dtl.apply(
+        lambda r: r["net_revenue_eur"] / r["discharge_kwh"]
+                  if r["discharge_kwh"] > 0.01 else (
+                  r["net_revenue_eur"] / r["charge_kwh"]
+                  if r["charge_kwh"] > 0.01 else 0), axis=1)
+
+    # Type kolom
+    dtl["Type"] = dtl.apply(lambda r:
+        ("🔵 Solar laden" if r.get("charge_solar_kwh", 0) > 0.01 else
+         "🟢 Inkomsten"   if r["net_revenue_eur"] > 0 else
+         "🔴 Kosten")
+        + (" ⏭ lookahead" if r.get("is_lookahead", False) else ""), axis=1)
+
+    dtl = dtl.rename(columns={
+        "datetime":       "Tijd",
+        "price_eur_mwh":  "Prijs (€/MWh)",
+        "charge_kwh":     "Geladen (kWh)",
+        "discharge_kwh":  "Ontladen (kWh)",
+        "net_revenue_eur":"Slot Rev (€)",
+        "soc_pct":        "SOC (%)",
+    })
+
+    # Kolom volgorde
+    col_order = ["Tijd","Type","Prijs (€/MWh)",
+                 "Geladen (kWh)","Laadvermogen (kW)",
+                 "Ontladen (kWh)","Injectievermogen (kW)",
+                 "Rev/kWh (€)","Slot Rev (€)",
+                 "SOC (%)","Cum. geladen (kWh)","Cum. ontladen (kWh)"]
+    col_order = [c for c in col_order if c in dtl.columns]
+    dtl = dtl[col_order].drop(columns=["is_lookahead","charge_solar_kwh"], errors="ignore")
+
+    # Afronden voor leesbaarheid
+    for col in dtl.select_dtypes(include="number").columns:
+        dtl[col] = dtl[col].round(3)
+
+    st.dataframe(dtl, use_container_width=True, hide_index=True, height=360,
+                 column_config={
+                     "Prijs (€/MWh)":        st.column_config.NumberColumn(format="%.2f"),
+                     "Geladen (kWh)":         st.column_config.NumberColumn(format="%.3f"),
+                     "Laadvermogen (kW)":     st.column_config.NumberColumn(format="%.2f"),
+                     "Ontladen (kWh)":        st.column_config.NumberColumn(format="%.3f"),
+                     "Injectievermogen (kW)": st.column_config.NumberColumn(format="%.2f"),
+                     "Rev/kWh (€)":           st.column_config.NumberColumn(format="%.4f"),
+                     "Slot Rev (€)":          st.column_config.NumberColumn(format="%.4f"),
+                     "SOC (%)":               st.column_config.NumberColumn(format="%.1f"),
+                     "Cum. geladen (kWh)":    st.column_config.NumberColumn(format="%.2f"),
+                     "Cum. ontladen (kWh)":   st.column_config.NumberColumn(format="%.2f"),
+                 })
+
+    # Totaalrij
+    exec_dtl = dtl[~dtl["Type"].str.contains("lookahead", na=False)]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Totaal geladen",  f"{exec_dtl['Geladen (kWh)'].sum():.2f} kWh")
+    c2.metric("Totaal ontladen", f"{exec_dtl['Ontladen (kWh)'].sum():.2f} kWh")
+    c3.metric("Gem. injectie",   f"{exec_dtl[exec_dtl['Ontladen (kWh)']>0]['Injectievermogen (kW)'].mean():.2f} kW")
+    c4.metric("Gem. rev/kWh",    f"{exec_dtl[exec_dtl['Ontladen (kWh)']>0]['Rev/kWh (€)'].mean():.4f} €")
+
+    # CSV export
     csv_be = _to_belgian_csv(dtl)
     st.download_button(
         label="📥 Download als CSV (Belgisch formaat voor Excel)",
