@@ -537,8 +537,6 @@ def _empty_imbalance_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["datetime","nrv_mw","si_mw","mip_eur_mwh",
                                    "mdp_eur_mwh","alpha","cip_eur_mwh","cdp_eur_mwh"])
 
-_empty_wind_df.__doc__ = 'Empty wind DataFrame'
-
 def _empty_solar_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["datetime","measured","dayaheadforecast",
                                    "weekaheadforecast","mostrecentforecast","region"])
