@@ -229,9 +229,10 @@ cap_forfait    = 2.5 * 60 / 12               # €12.50/maand minimumforfait
 cap_extra      = cap_monthly - cap_forfait   # extra boven forfait
 
 st.sidebar.info(
-    f"⚡ **Capaciteitstarief**: {cap_peak_kw:.1f} kW piek "
+    f"⚡ **Rule-based cap.tarief**: {cap_peak_kw:.1f} kW piek "
     f"→ **{cap_monthly:.2f} €/mnd**"
     + (f" (+{cap_extra:.2f} € vs forfait)" if cap_extra > 0.01 else " (= forfait minimum)")
+    + "\n\n_MILP kiest zijn eigen optimale piek (2.5–5 kW)._"
 )
 
 charge_thresh    = st.sidebar.slider("Laden onder (€/MWh)", 0, 80, 50)
@@ -1007,10 +1008,12 @@ def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh,
 
     df_result = pd.DataFrame(results)
     n_days    = len(data) * 0.25 / 24.0
+    n_months  = n_days / 30.44  # zelfde formule als MILP optimizer
 
     # Capaciteitstarief — gebaseerd op werkelijke piek (min. forfait)
+    # Formule: piek × (€60/12) × n_maanden  (zelfde als MILP)
     peak_kw_cap  = max(cap_min_kw, peak_kw_seen)
-    cap_cost     = peak_kw_cap * cap_eur_per_kw_year * (n_days / 365.0)
+    cap_cost     = peak_kw_cap * (cap_eur_per_kw_year / 12.0) * n_months
     cap_monthly  = peak_kw_cap * cap_eur_per_kw_year / 12.0
 
     # Cumulatieve revenue na capaciteitstarief
