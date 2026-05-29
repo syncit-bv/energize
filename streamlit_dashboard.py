@@ -207,14 +207,18 @@ discharge_power_kw = st.sidebar.slider(
     help="Maximaal vermogen bij injectie op het net. Geen capaciteitstarief van toepassing."
 )
 charge_power_kw = st.sidebar.slider(
-    "Max laadvermogen / afname (kW)", 1.0, 11.0, 5.0, 0.5,
+    "Max laadvermogen — rule-based (kW)", 1.0, 11.0, 2.5, 0.5,
     help=(
-        "Fysische bovengrens van de omvormer bij afname van het net (= omvormerrating).\n\n"
-        "MILP kiest zelf de optimale laadpiek tussen het forfait-minimum (2.5 kW) "
-        "en deze bovengrens. Hogere piek = sneller laden maar meer capaciteitstarief.\n\n"
-        "Stel dit in op de werkelijke capaciteit van jouw omvormer, niet op het forfait."
+        "Maximaal laadvermogen voor de RULE-BASED simulatie.\n\n"
+        "De MILP optimaliseert het laadvermogen zelf: hij kiest automatisch "
+        "de optimale piek tussen het forfait-minimum (2.5 kW) en het "
+        "ontlaadvermogen van de omvormer (5 kW).\n\n"
+        "Deze slider heeft géén invloed op de MILP berekeningen."
     )
 )
+# MILP gebruikt altijd de fysische omvormerlimiet als bovengrens (= discharge_power_kw)
+# en het forfait-minimum als ondergrens (2.5 kW). MILP beslist zelf wat optimaal is.
+milp_charge_upper_kw = discharge_power_kw  # omvormerlimiet = zelfde voor laden en ontladen
 # Backwards-compat: max_power_kw = discharge (gebruikt in rule-based + MILP)
 max_power_kw = discharge_power_kw
 
@@ -249,17 +253,21 @@ t_discharge_min  = (usable_kwh / (max_e_slot_dis / ETA)) * 15
 
 with st.sidebar.expander("🔬 Batterij specs & validatie", expanded=True):
     s1, s2 = st.columns(2)
-    s1.metric("Laden/slot",    f"{max_e_slot_ch:.2f} kWh",
-              help="Max kWh per 15 min van het net (capaciteitstarief-zijde)")
+    s1.metric("Laden/slot (rule-based)", f"{max_e_slot_ch:.2f} kWh",
+              help=f"Max kWh per 15 min bij {charge_power_kw} kW (rule-based slider). MILP kiest zelf optimaal tussen 2.5–{discharge_power_kw} kW.")
     s2.metric("Ontladen/slot", f"{max_e_slot_dis:.2f} kWh",
-              help="Max kWh per 15 min naar het net (geen capaciteitstarief)")
+              help="Max kWh per 15 min naar het net (geen capaciteitstarief). Geldt voor rule-based én MILP.")
     s3, s4 = st.columns(2)
-    s3.metric("Vol laden",    f"{t_charge_min:.0f} min",
-              help=f"Van {min_soc_pct}% naar 100% bij {charge_power_kw} kW")
+    s3.metric("Vol laden (rule-based)", f"{t_charge_min:.0f} min",
+              help=f"Van {min_soc_pct}% naar 100% bij {charge_power_kw} kW (rule-based). MILP kan sneller laden als dat loont.")
     s4.metric("Vol ontladen", f"{t_discharge_min:.0f} min",
-              help=f"Van 100% naar {min_soc_pct}% bij {discharge_power_kw} kW")
-    asym = discharge_power_kw / charge_power_kw
-    st.success(f"⚡ Ontladen is **{asym:.1f}× sneller** dan laden — asymmetrie actief")
+              help=f"Van 100% naar {min_soc_pct}% bij {discharge_power_kw} kW (geldt voor alle scenario's)")
+    asym_milp = discharge_power_kw / 2.5  # MILP min piek
+    asym_rb   = discharge_power_kw / charge_power_kw
+    st.success(
+        f"⚡ MILP: ontladen is tot **{asym_milp:.1f}× sneller** dan laden (bij forfait 2.5 kW) "
+        f"| Rule-based: {asym_rb:.1f}×"
+    )
     max_c = max(c_rate_ch, c_rate_dis)
     if max_c > 2.0:
         st.error(f"⚠️ C-rate = {max_c:.1f}C — ZEER HOOG.")
@@ -752,7 +760,7 @@ if st.session_state.milp_pending:
                 milp_input,
                 battery_kwh=battery_kwh,
                 max_power_kw=discharge_power_kw,
-                charge_power_kw=charge_power_kw,
+                charge_power_kw=milp_charge_upper_kw,  # omvormerlimiet, MILP kiest zelf optimale piek
                 min_soc=min_soc_pct / 100,
                 min_end_soc=min_end_soc_pct / 100,
                 initial_soc=st.session_state.get("milp_initial_soc", 0.50),
@@ -785,7 +793,7 @@ if st.session_state.get("scenarios_pending"):
     milp_args  = dict(
         battery_kwh=battery_kwh,
         max_power_kw=discharge_power_kw,
-        charge_power_kw=charge_power_kw,
+        charge_power_kw=milp_charge_upper_kw,  # omvormerlimiet, MILP kiest zelf optimale piek
         min_soc=min_soc_pct / 100,
         min_end_soc=min_end_soc_pct / 100,
         initial_soc=init_soc,
