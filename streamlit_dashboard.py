@@ -1007,6 +1007,7 @@ def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh,
                          "soc": soc * 100, "cum_rev": cum_rev})
 
 
+    df_result = pd.DataFrame(results)
     # Geen attrs — cap tarief wordt buiten de functie berekend op basis van
     # charge_power_kw slider, zodat het altijd correct en transparant is.
     return df_result
