@@ -1006,26 +1006,9 @@ def quick_simulate(data, cap_kwh, pwr_kw, ch_thresh, dis_thresh,
                          "energy_kwh": e_mwh * 1000, "revenue": rev,
                          "soc": soc * 100, "cum_rev": cum_rev})
 
-    df_result = pd.DataFrame(results)
-    n_days    = len(data) * 0.25 / 24.0
-    n_months  = n_days / 30.44  # zelfde formule als MILP optimizer
 
-    # Capaciteitstarief — gebaseerd op werkelijke piek (min. forfait)
-    # Formule: piek × (€60/12) × n_maanden  (zelfde als MILP)
-    peak_kw_cap  = max(cap_min_kw, peak_kw_seen)
-    cap_cost     = peak_kw_cap * (cap_eur_per_kw_year / 12.0) * n_months
-    cap_monthly  = peak_kw_cap * cap_eur_per_kw_year / 12.0
-
-    # Cumulatieve revenue na capaciteitstarief
-    if not df_result.empty:
-        df_result["cum_rev_after_cap"] = df_result["cum_rev"] - cap_cost
-
-    df_result.attrs["peak_kw"]         = round(peak_kw_cap, 3)
-    df_result.attrs["cap_cost"]        = round(cap_cost, 4)
-    df_result.attrs["cap_monthly"]     = round(cap_monthly, 2)
-    df_result.attrs["gross_rev"]       = round(df_result["cum_rev"].iloc[-1], 4) if not df_result.empty else 0
-    df_result.attrs["net_rev_after_cap"] = round(df_result["cum_rev"].iloc[-1] - cap_cost, 4) if not df_result.empty else 0
-
+    # Geen attrs — cap tarief wordt buiten de functie berekend op basis van
+    # charge_power_kw slider, zodat het altijd correct en transparant is.
     return df_result
 
 sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh,
@@ -1033,12 +1016,17 @@ sim = quick_simulate(sim_df, battery_kwh, max_power_kw, charge_thresh,
                      initial_soc_pct / 100,
                      charge_pwr_kw=charge_power_kw)
 
-# Capaciteitstarief extractie uit rule-based simulatie
-rb_peak_kw   = sim.attrs.get("peak_kw", cap_peak_kw)
-rb_cap_cost  = sim.attrs.get("cap_cost", 0)
-rb_cap_mnd   = sim.attrs.get("cap_monthly", cap_monthly)
-rb_gross_rev = sim.attrs.get("gross_rev", sim["cum_rev"].iloc[-1] if not sim.empty else 0)
-rb_net_rev   = sim.attrs.get("net_rev_after_cap", rb_gross_rev)
+# Capaciteitstarief rule-based: direct berekend uit de slider charge_power_kw
+# Geen pandas attrs — volledig transparant en betrouwbaar
+rb_n_months  = len(sim_df) * 0.25 / 24.0 / 30.44
+rb_peak_kw   = max(2.5, charge_power_kw)        # slider = rule-based laadlimiet
+rb_cap_cost  = rb_peak_kw * (60.0 / 12.0) * rb_n_months
+rb_cap_mnd   = rb_peak_kw * 60.0 / 12.0         # €/maand bij deze piek
+rb_gross_rev = sim["cum_rev"].iloc[-1] if not sim.empty else 0.0
+rb_net_rev   = rb_gross_rev - rb_cap_cost
+# cum_rev_after_cap toevoegen aan sim
+if not sim.empty:
+    sim["cum_rev_after_cap"] = sim["cum_rev"] - rb_cap_cost
 
 milp_df    = st.session_state.get("milp_schedule")
 milp_summ  = st.session_state.get("milp_summary") or {}
