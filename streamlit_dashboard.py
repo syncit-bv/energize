@@ -1666,7 +1666,11 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
         st.warning("elia_client.py niet gevonden.")
     else:
         # ── Tabs: Imbalance | Solar ──
-        tab_imb, tab_solar = st.tabs(["⚡ Imbalance Prijzen", "☀️ Solar PV Forecast"])
+        tab_imb, tab_solar, tab_wind = st.tabs([
+            "⚡ Imbalance Prijzen",
+            "☀️ Solar PV Forecast",
+            "🌬️ Wind + Hernieuwbaar Surplus",
+        ])
 
         # ── TAB 1: Imbalance ──────────────────────────────────────────────────
         with tab_imb:
@@ -1868,6 +1872,158 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
                                 st.warning("Geen historische solar data.")
                         except Exception as e:
                             st.error(f"Solar historisch fout: {e}")
+
+        # ── TAB 3: Wind + Hernieuwbaar Surplus ───────────────────────────────
+        with tab_wind:
+            st.markdown(
+                "**Wind- en hernieuwbaar surplus forecast voor België** via Elia (ods086).\n\n"
+                "Strategisch belang voor EMS:\n"
+                "- **Hoog surplus** (wind + zon > 4000 MW) → verwacht **negatieve/lage prijzen** → plan **laden**\n"
+                "- De prijs-correctie toont hoeveel €/MWh lager de prijs verwacht wordt t.o.v. het basisniveau\n"
+                "- Scenario 5 (MILP+Solar+Wind) gebruikt deze correctie automatisch in de MILP-berekening"
+            )
+
+            wind_col1, wind_col2 = st.columns(2)
+
+            with wind_col1:
+                if st.button("🌬️ Wind forecast + Surplus (ods086)", key="btn_wind_now"):
+                    with st.spinner("Elia wind forecast + surplus berekenen…"):
+                        try:
+                            ec         = EliaClient()
+                            df_wind    = ec.get_wind_forecast()
+                            surplus_df = ec.get_renewable_surplus_forecast()
+                            advice     = ec.get_wind_solar_ems_advice()
+
+                            st.info(f"💡 **EMS Advies:** {advice.get('advice', '—')}")
+
+                            if not surplus_df.empty:
+                                # Surplus grafiek met prijs-correctie
+                                fig_w = go.Figure()
+
+                                # Solar MW
+                                if "solar_mw" in surplus_df.columns:
+                                    fig_w.add_trace(go.Bar(
+                                        x=surplus_df["datetime"],
+                                        y=surplus_df["solar_mw"],
+                                        name="Solar (MW)", marker_color="#FFA500",
+                                        opacity=0.7))
+                                # Wind MW (gestapeld op solar)
+                                if "wind_mw" in surplus_df.columns:
+                                    fig_w.add_trace(go.Bar(
+                                        x=surplus_df["datetime"],
+                                        y=surplus_df["wind_mw"],
+                                        name="Wind (MW)", marker_color="#4CA3DD",
+                                        opacity=0.7))
+                                # Prijs-correctie op secundaire as
+                                if "price_adjustment_eur_mwh" in surplus_df.columns:
+                                    fig_w.add_trace(go.Scatter(
+                                        x=surplus_df["datetime"],
+                                        y=surplus_df["price_adjustment_eur_mwh"],
+                                        name="Prijscorrectie (€/MWh)",
+                                        line=dict(color="red", width=2, dash="dot"),
+                                        yaxis="y2"))
+
+                                fig_w.update_layout(
+                                    title="Hernieuwbaar Surplus = Wind + Solar (MW) + Verwachte Prijscorrectie",
+                                    xaxis_title="Tijd",
+                                    yaxis=dict(title="Vermogen (MW)"),
+                                    yaxis2=dict(
+                                        title="Prijscorrectie (€/MWh)",
+                                        overlaying="y", side="right",
+                                        tickformat=".0f",
+                                        color="red",
+                                    ),
+                                    barmode="stack",
+                                    legend=dict(x=0, y=1.1, orientation="h"),
+                                )
+                                st.plotly_chart(fig_w, use_container_width=True)
+
+                                # KPI metrics
+                                tomorrow = dt.date.today() + dt.timedelta(days=1)
+                                tm_df = surplus_df[surplus_df["datetime"].dt.date == tomorrow]
+                                if not tm_df.empty:
+                                    w1, w2, w3, w4 = st.columns(4)
+                                    w1.metric("Piek surplus morgen",
+                                              f"{tm_df['surplus_mw'].max():.0f} MW",
+                                              help="Max wind + solar morgen")
+                                    w2.metric("Max prijscorrectie",
+                                              f"{tm_df['price_adjustment_eur_mwh'].min():.1f} €/MWh",
+                                              delta_color="inverse",
+                                              help="Negatief = lagere verwachte prijs door surplus")
+                                    w3.metric("Laadkwartieren met >20€ surplus",
+                                              f"{(tm_df['price_adjustment_eur_mwh'] < -20).sum()}",
+                                              help="Kwartieren waarbij MILP proactief zal laden")
+                                    w4.metric("Piek tijdstip",
+                                              str(tm_df.loc[tm_df['surplus_mw'].idxmax(),
+                                                            'datetime'])[:16][-5:])
+
+                                    st.caption(
+                                        "ℹ️ **Prijscorrectieformule**: elke 1000 MW surplus boven 2000 MW "
+                                        "geeft een verwachte prijsdaling van -8 €/MWh. "
+                                        "Bij 6000 MW totaal surplus = -32 €/MWh correctie. "
+                                        "Scenario 5 (MILP+Solar+Wind) past deze correctie toe in de "
+                                        "optimalisatie-objectieffunctie."
+                                    )
+
+                                with st.expander("📋 Ruwe surplus data", expanded=False):
+                                    st.dataframe(surplus_df.round(1),
+                                                 use_container_width=True, hide_index=True,
+                                                 height=300)
+                            else:
+                                st.warning("Geen wind/solar surplus data beschikbaar.")
+
+                            # Ruwe wind data
+                            if not df_wind.empty:
+                                with st.expander("📋 Ruwe wind forecast (ods086)", expanded=False):
+                                    st.caption(f"Kolommen: {list(df_wind.columns)}")
+                                    st.dataframe(df_wind.head(30),
+                                                 use_container_width=True, hide_index=True)
+
+                        except Exception as e:
+                            st.error(f"Wind forecast fout: {e}")
+                            st.caption("Tip: controleer of `elia-py` de `get_wind_power_estimation_and_forecast` "
+                                       "methode ondersteunt (vereist elia-py ≥ 0.3.1)")
+
+            with wind_col2:
+                st.markdown("**Historische wind productie**")
+                wind_hist_days = st.slider("Dagen terug", 1, 30, 7, key="wind_hist_days")
+                if st.button("📅 Historische wind (ods086)", key="btn_wind_hist"):
+                    with st.spinner("Historische wind ophalen…"):
+                        try:
+                            ec         = EliaClient()
+                            hist_end   = dt.date.today()
+                            hist_start = hist_end - dt.timedelta(days=wind_hist_days)
+                            df_wh      = ec.get_historical_wind(hist_start, hist_end)
+
+                            if not df_wh.empty:
+                                st.success(f"✅ {len(df_wh)} rijen | {wind_hist_days} dagen")
+
+                                plot_cols = [c for c in df_wh.columns
+                                             if c not in ("datetime", "region")
+                                             and df_wh[c].dtype in ("float64", "int64")]
+
+                                if plot_cols and "datetime" in df_wh.columns:
+                                    fig_wh = go.Figure()
+                                    colors = ["#4CA3DD", "#1E90FF", "#87CEEB"]
+                                    for i, col in enumerate(plot_cols[:3]):
+                                        fig_wh.add_trace(go.Scatter(
+                                            x=df_wh["datetime"], y=df_wh[col],
+                                            mode="lines", name=col,
+                                            line=dict(color=colors[i % len(colors)], width=1.5)))
+                                    fig_wh.update_layout(
+                                        title=f"Historische Wind Productie — {wind_hist_days} dagen",
+                                        xaxis_title="Tijd", yaxis_title="MW")
+                                    st.plotly_chart(fig_wh, use_container_width=True)
+
+                                st.caption(
+                                    "💡 Correleer windproductie met day-ahead prijzen: "
+                                    "hoge wind 's nachts → soms negatieve prijzen. "
+                                    "Hoge wind + zon overdag → sterkste prijsdaling."
+                                )
+                            else:
+                                st.warning("Geen historische winddata.")
+                        except Exception as e:
+                            st.error(f"Wind historisch fout: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Intraday Pricing (placeholder — EPEX SPOT data niet gratis beschikbaar)
