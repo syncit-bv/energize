@@ -414,11 +414,13 @@ if ENTSOE_AVAILABLE:
             st.caption("⚠️ Geen key — ophaalknoppen werken niet tot je een key invult.")
 
         # Preset fetch buttons
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4, c5 = st.columns(5)
         fetch_days = None
-        if c1.button("7 d",  use_container_width=True): fetch_days = 7
-        if c2.button("30 d", use_container_width=True): fetch_days = 30
-        if c3.button("90 d", use_container_width=True): fetch_days = 90
+        if c1.button("7 d",   use_container_width=True): fetch_days = 7
+        if c2.button("30 d",  use_container_width=True): fetch_days = 30
+        if c3.button("90 d",  use_container_width=True): fetch_days = 90
+        if c4.button("180 d", use_container_width=True): fetch_days = 180
+        if c5.button("365 d", use_container_width=True): fetch_days = 365
 
         if fetch_days:
             if not entsoe_key:
@@ -1841,8 +1843,8 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
                     with st.spinner("Historische solar ophalen…"):
                         try:
                             ec       = EliaClient()
-                            hist_end = dt.date.today()
-                            hist_start = hist_end - dt.timedelta(days=hist_days)
+                            hist_end = date.today()
+                            hist_start = hist_end - timedelta(days=hist_days)
                             df_hist  = ec.get_historical_solar(hist_start, hist_end)
 
                             if not df_hist.empty:
@@ -1940,7 +1942,7 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
                                 st.plotly_chart(fig_w, use_container_width=True)
 
                                 # KPI metrics
-                                tomorrow = dt.date.today() + dt.timedelta(days=1)
+                                tomorrow = date.today() + timedelta(days=1)
                                 tm_df = surplus_df[surplus_df["datetime"].dt.date == tomorrow]
                                 if not tm_df.empty:
                                     w1, w2, w3, w4 = st.columns(4)
@@ -1992,8 +1994,8 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
                     with st.spinner("Historische wind ophalen…"):
                         try:
                             ec         = EliaClient()
-                            hist_end   = dt.date.today()
-                            hist_start = hist_end - dt.timedelta(days=wind_hist_days)
+                            hist_end   = date.today()
+                            hist_start = hist_end - timedelta(days=wind_hist_days)
                             df_wh      = ec.get_historical_wind(hist_start, hist_end)
 
                             if not df_wh.empty:
