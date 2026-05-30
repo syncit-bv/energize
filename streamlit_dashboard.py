@@ -2044,8 +2044,8 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
     sz_c1, sz_c2, sz_c3 = st.columns(3)
     with sz_c1:
         capex_kwh = st.number_input(
-            "CAPEX batterij (€/kWh geïnstalleerd)", 200, 1000, 500, 50,
-            help="Totale installatiekost per kWh capaciteit. LFP 2026: ±€400-600/kWh.")
+            "CAPEX batterij (€/kWh geïnstalleerd)", 10, 1000, 500, 10,
+            help="Totale installatiekost per kWh capaciteit. DIY LFP-cellen: ±€80-150/kWh, professioneel geïnstalleerd: ±€400-600/kWh.")
         lifespan  = st.number_input(
             "Verwachte levensduur (jaar)", 5, 25, 12, 1,
             help="LFP-batterijen halen typisch 10-15 jaar bij 1 cyclus/dag.")
