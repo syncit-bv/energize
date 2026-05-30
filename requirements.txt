@@ -1,7 +1,10 @@
 streamlit>=1.32
 pandas>=2.0
+numpy>=1.24
 plotly>=5.20
 pulp>=2.7
 requests>=2.31
 elia-py>=0.3.1
+entsoe-py>=0.6
 pyarrow>=14.0
+highspy>=1.7

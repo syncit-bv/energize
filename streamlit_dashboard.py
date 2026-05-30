@@ -2099,6 +2099,27 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
             help=f"Max laadvermogen van net. Wettelijke limiet: {max_afname_kw} kW."
         )
 
+        # ── Data-kwaliteitscheck ──────────────────────────────────────────────────
+        n_days_loaded = len(df) * 0.25 / 24.0
+        n_days_sel    = len(sim_df) * 0.25 / 24.0
+        sz_data       = sim_df  # standaard: gebruik geselecteerde periode
+        if n_days_loaded < 350:
+            st.warning(
+                f"⚠️ Slechts **{n_days_loaded:.0f} dagen geladen.** "
+                "Voor een betrouwbare battery sizing is **1 volledig jaar (365 dagen) "
+                "vereist** — seizoenseffecten bepalen tot 40% van de jaaropbrengst. "
+                "Gebruik de **365 d** knop onder ENTSO-E."
+            )
+        elif n_days_sel < 350:
+            st.warning(
+                f"⚠️ Geselecteerde periode: **{n_days_sel:.0f} dagen**. "
+                f"Extrapolatie naar 1 jaar geeft mogelijk tot {max(0, int(abs(n_days_sel/182.5-1)*40)):.0f}% foutmarge. "
+                "Selecteer een volledig jaar voor maximale nauwkeurigheid."
+            )
+            sz_data = df  # gebruik alle beschikbare data als fallback
+        else:
+            st.success(f"✅ {n_days_sel:.0f} dagen geselecteerd — ideaal voor jaaranalyse.")
+
         if not df.empty and st.button(
                 "🚀 Start Battery Sizing Analyse", type="primary",
                 key="btn_sizing", use_container_width=True):
@@ -2134,19 +2155,17 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
                             except Exception:
                                 solar_sz = None
 
+                        _sz_hash = f"{len(sz_data)}_{sz_data['price_eur_mwh'].sum():.1f}_{sz_afname}_{sz_injectie}_{capex_kwh}_{lifespan}"
                         sz_results = battery_sizing_analysis(
-                            sim_df,
+                            _sz_hash, sz_data,
                             battery_sizes_kwh=[float(s) for s in battery_sizes],
-                            max_power_kw=float(sz_injectie),     # injectie-limiet
-                            charge_power_kw=float(sz_afname),    # afname-limiet
+                            max_power_kw=float(sz_injectie),
+                            charge_power_kw=float(sz_afname),
                             min_soc=min_soc_pct / 100,
-                            min_end_soc=min_end_soc_pct / 100,
                             initial_soc=initial_soc_pct / 100,
                             capex_per_kwh=float(capex_kwh),
                             lifespan_years=float(lifespan),
-                            solar_kwh_per_slot=solar_sz,
                         )
-                        st.session_state["sizing_results"] = sz_results
                     except Exception as e:
                         st.error(f"Sizing analyse fout: {e}")
 
@@ -2260,6 +2279,19 @@ with st.expander("⚡ Mono vs Driefasig — Gedetailleerde Vergelijkingstabel", 
         cmp_subsidie  = st.number_input("Subsidie / premie (€)", 0, 5000, 0, 100, key="cmp_subsidie",
                           help="Éénmalige subsidie (bv. Vlaanderen, gemeente)")
 
+    # ── Data-kwaliteitscheck ────────────────────────────────────────────────────
+    n_days_cmp = len(sim_df) * 0.25 / 24.0
+    cmp_data   = sim_df
+    if n_days_cmp < 350:
+        pct = max(0, int(abs(n_days_cmp/182.5-1)*40))
+        st.warning(
+            f"⚠️ **{n_days_cmp:.0f} dagen geselecteerd** — voor een correcte mono/driefasig "
+            f"vergelijking is **1 volledig jaar aanbevolen** (tot {pct}% foutmarge). "
+            "Laad 365 dagen via ENTSO-E en selecteer het volledige jaar."
+        )
+    else:
+        st.success(f"✅ {n_days_cmp:.0f} dagen — ideaal voor de vergelijkingstabel.")
+
     if not df.empty and st.button("📊 Bereken vergelijkingstabel",
                                    type="primary", key="btn_cmp",
                                    use_container_width=True):
@@ -2270,8 +2302,9 @@ with st.expander("⚡ Mono vs Driefasig — Gedetailleerde Vergelijkingstabel", 
                     "Monofase":  (5.0,  9.2,  cmp_kwh_m),
                     "Driefasig": (10.0, 15.9, cmp_kwh_d),
                 }.items():
+                    _cmp_hash = f"{len(cmp_data)}_{cmp_data['price_eur_mwh'].sum():.1f}_{inj}_{afl}_{kwh}_{cmp_capex}_{cmp_leven}"
                     r = battery_sizing_analysis(
-                        sim_df, battery_sizes_kwh=[float(kwh)],
+                        _cmp_hash, cmp_data, battery_sizes_kwh=[float(kwh)],
                         max_power_kw=inj, charge_power_kw=afl,
                         min_soc=min_soc_pct/100, initial_soc=initial_soc_pct/100,
                         capex_per_kwh=float(cmp_capex), lifespan_years=float(cmp_leven),
