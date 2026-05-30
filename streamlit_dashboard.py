@@ -201,31 +201,63 @@ st.markdown(
 # Sidebar — Battery & Strategy Parameters
 # ─────────────────────────────────────────────────────────────────────────────
 st.sidebar.header("🔋 Batterij & Strategie")
-battery_kwh      = st.sidebar.slider("Capaciteit (kWh)", 5.0, 30.0, 10.0, 0.5)
+battery_kwh      = st.sidebar.slider("Capaciteit (kWh)", 5.0, 100.0, 10.0, 0.5)
 
-# Asymmetrisch vermogen: ontladen en laden onafhankelijk instelbaar
+# ── Aansluitingstype ──────────────────────────────────────────────────────────
+aansluiting = st.sidebar.radio(
+    "Aansluitingstype",
+    ["⚡ Monofase (1×230V — max 5 kW)", "⚡⚡⚡ Driefasig (3×230V — max 10 kW)"],
+    index=0,
+    help=(
+        "**Monofase**: max 5 kW injectie én afname. Typisch voor woningen < 10 jaar oud "
+        "of oudere aansluitingen.\n\n"
+        "**Driefasig**: max 10 kW injectie én afname. Standaard bij nieuwbouw en "
+        "woningen met warmtepomp of laadpaal. Laat maximaal 2× meer batterijcapaciteit "
+        "rendabel benutten."
+    ),
+)
+is_driefasig     = "Driefasig" in aansluiting
+max_inj_kw       = 10.0 if is_driefasig else 5.0   # netbeheerder-limiet
+max_cap_kw       = 10.0 if is_driefasig else 5.0
+
+if is_driefasig:
+    st.sidebar.success(
+        f"⚡⚡⚡ **Driefasig** — max {max_inj_kw:.0f} kW injectie & afname. "
+        f"Optimale batterijgrootte: ~{max_inj_kw * 4 * 0.9:.0f} kWh."
+    )
+else:
+    st.sidebar.info(
+        f"⚡ **Monofase** — max {max_inj_kw:.0f} kW injectie & afname. "
+        f"Optimale batterijgrootte: ~{max_inj_kw * 4 * 0.9:.0f} kWh."
+    )
+
+# Asymmetrisch vermogen — standaard ingesteld op aansluitingslimiet
 discharge_power_kw = st.sidebar.slider(
-    "Max ontlaadvermogen / injectie (kW)", 2.0, 11.0, 5.0, 0.5,
-    help="Maximaal vermogen bij injectie op het net. Geen capaciteitstarief van toepassing."
+    "Max ontlaadvermogen / injectie (kW)",
+    0.5, max_inj_kw, min(max_inj_kw, 5.0), 0.5,
+    help=(
+        f"Maximaal vermogen bij injectie op het net. "
+        f"Netbeheerder-limiet: {max_inj_kw:.0f} kW ({'driefasig' if is_driefasig else 'monofase'}). "
+        "Geen capaciteitstarief van toepassing."
+    ),
 )
 charge_power_kw = st.sidebar.slider(
-    "Max laadvermogen — rule-based (kW)", 1.0, 11.0, 2.5, 0.5,
+    "Max laadvermogen — rule-based (kW)", 0.5, max_cap_kw, 2.5, 0.5,
     help=(
         "Maximaal laadvermogen voor de RULE-BASED simulatie.\n\n"
         "De MILP optimaliseert het laadvermogen zelf: hij kiest automatisch "
-        "de optimale piek tussen het forfait-minimum (2.5 kW) en het "
-        "ontlaadvermogen van de omvormer (5 kW).\n\n"
+        f"de optimale piek tussen het forfait-minimum (2.5 kW) en de "
+        f"aansluitingslimiet ({max_cap_kw:.0f} kW).\n\n"
         "Deze slider heeft géén invloed op de MILP berekeningen."
-    )
+    ),
 )
-# MILP gebruikt altijd de fysische omvormerlimiet als bovengrens (= discharge_power_kw)
-# en het forfait-minimum als ondergrens (2.5 kW). MILP beslist zelf wat optimaal is.
-milp_charge_upper_kw = discharge_power_kw  # omvormerlimiet = zelfde voor laden en ontladen
-# Backwards-compat: max_power_kw = discharge (gebruikt in rule-based + MILP)
+# MILP gebruikt de aansluitingslimiet als bovengrens (niet de rule-based slider)
+milp_charge_upper_kw = discharge_power_kw  # omvormerlimiet = aansluitingslimiet
+# Backwards-compat
 max_power_kw = discharge_power_kw
 
 # Capaciteitstarief berekening
-cap_peak_kw    = max(2.5, charge_power_kw)   # MILP kan hoger gaan maar dit is de user-instelling
+cap_peak_kw    = max(2.5, charge_power_kw)
 cap_monthly    = cap_peak_kw * 60 / 12       # €/maand bij deze piek
 cap_forfait    = 2.5 * 60 / 12               # €12.50/maand minimumforfait
 cap_extra      = cap_monthly - cap_forfait   # extra boven forfait
@@ -2057,8 +2089,11 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
         use_solar_sz  = st.checkbox("Solar meenemen in sweep", value=own_kwp > 0,
                                      help="Gebruikt eigen PV-vermogen van de sidebar")
         sz_inverter   = st.number_input(
-            "Omvormervermogen sweep (kW)", 2.0, 11.0, float(discharge_power_kw), 0.5,
-            help="Max. laad/ontlaadvermogen voor de sizing sweep.")
+            "Omvormervermogen sweep (kW)", 0.5, max_inj_kw, float(discharge_power_kw), 0.5,
+            help=f"Max. laad/ontlaadvermogen voor de sizing sweep. "
+                 f"Aansluitingslimiet: {{max_inj_kw:.0f}} kW "
+                 f"({{'driefasig' if is_driefasig else 'monofase'}})."
+        )
 
     if not df.empty and st.button(
             "🚀 Start Battery Sizing Analyse", type="primary",
