@@ -206,58 +206,60 @@ battery_kwh      = st.sidebar.slider("Capaciteit (kWh)", 5.0, 100.0, 10.0, 0.5)
 # ── Aansluitingstype ──────────────────────────────────────────────────────────
 aansluiting = st.sidebar.radio(
     "Aansluitingstype",
-    ["⚡ Monofase (1×230V — max 5 kW)", "⚡⚡⚡ Driefasig (3×230V — max 10 kW)"],
+    ["⚡ Monofase (1×230V)", "⚡⚡⚡ Driefasig (3×230V)"],
     index=0,
     help=(
-        "**Monofase**: max 5 kW injectie én afname. Typisch voor woningen < 10 jaar oud "
-        "of oudere aansluitingen.\n\n"
-        "**Driefasig**: max 10 kW injectie én afname. Standaard bij nieuwbouw en "
-        "woningen met warmtepomp of laadpaal. Laat maximaal 2× meer batterijcapaciteit "
-        "rendabel benutten."
+        "Bepaalt de wettelijke vermogensgrenzen van de netaansluiting:\n\n"
+        "**Monofase**: max 9,2 kW afname van het net, max 5 kW injectie op het net.\n\n"
+        "**Driefasig**: max 15,9 kW afname van het net, max 10 kW injectie op het net.\n\n"
+        "Let op: afname en injectie hebben verschillende limieten!"
     ),
 )
-is_driefasig     = "Driefasig" in aansluiting
-max_inj_kw       = 10.0 if is_driefasig else 5.0   # netbeheerder-limiet
-max_cap_kw       = 10.0 if is_driefasig else 5.0
+is_driefasig = "Driefasig" in aansluiting
+# Correcte wettelijke limieten (Fluvius/Synergrid)
+max_afname_kw    = 15.9 if is_driefasig else 9.2    # max laden VAN net
+max_inj_kw       = 10.0 if is_driefasig else 5.0    # max injecteren OP net
+max_cap_kw       = max_afname_kw                     # laadlimiet = afname-limiet
 
+_opt_kwh = round(min(max_afname_kw, max_inj_kw / (0.92**0.5)) * 4 * (0.92**0.5), 0)
 if is_driefasig:
     st.sidebar.success(
-        f"⚡⚡⚡ **Driefasig** — max {max_inj_kw:.0f} kW injectie & afname. "
-        f"Optimale batterijgrootte: ~{max_inj_kw * 4 * 0.9:.0f} kWh."
+        f"⚡⚡⚡ **Driefasig** — afname max {max_afname_kw} kW | injectie max {max_inj_kw:.0f} kW. "
+        f"Technisch optimale batterij: ~{_opt_kwh:.0f} kWh."
     )
 else:
     st.sidebar.info(
-        f"⚡ **Monofase** — max {max_inj_kw:.0f} kW injectie & afname. "
-        f"Optimale batterijgrootte: ~{max_inj_kw * 4 * 0.9:.0f} kWh."
+        f"⚡ **Monofase** — afname max {max_afname_kw} kW | injectie max {max_inj_kw:.0f} kW. "
+        f"Technisch optimale batterij: ~{_opt_kwh:.0f} kWh."
     )
 
 # Asymmetrisch vermogen — standaard ingesteld op aansluitingslimiet
 discharge_power_kw = st.sidebar.slider(
-    "Max ontlaadvermogen / injectie (kW)",
+    "Max injectievermogen (kW)",
     0.5, max_inj_kw, min(max_inj_kw, 5.0), 0.5,
     help=(
-        f"Maximaal vermogen bij injectie op het net. "
-        f"Netbeheerder-limiet: {max_inj_kw:.0f} kW ({'driefasig' if is_driefasig else 'monofase'}). "
-        "Geen capaciteitstarief van toepassing."
+        f"Maximaal vermogen bij injectie OP het net. "
+        f"Wettelijke limiet: {max_inj_kw:.0f} kW ({'driefasig' if is_driefasig else 'monofase'}). "
+        "Geen capaciteitstarief op injectie."
     ),
 )
 charge_power_kw = st.sidebar.slider(
-    "Max laadvermogen — rule-based (kW)", 0.5, max_cap_kw, 2.5, 0.5,
+    "Max laadvermogen — rule-based (kW)", 0.5, max_afname_kw, 2.5, 0.5,
     help=(
-        "Maximaal laadvermogen voor de RULE-BASED simulatie.\n\n"
-        "De MILP optimaliseert het laadvermogen zelf: hij kiest automatisch "
-        f"de optimale piek tussen het forfait-minimum (2.5 kW) en de "
-        f"aansluitingslimiet ({max_cap_kw:.0f} kW).\n\n"
+        "Maximaal afnamevermogen voor de RULE-BASED simulatie.\n\n"
+        f"Wettelijke afname-limiet: {max_afname_kw} kW. "
+        "De MILP optimaliseert het laadvermogen zelf tussen 2.5 kW en "
+        f"{max_afname_kw} kW op basis van capaciteitstarief vs. arbitrage-opbrengst.\n\n"
         "Deze slider heeft géén invloed op de MILP berekeningen."
     ),
 )
-# MILP gebruikt de aansluitingslimiet als bovengrens (niet de rule-based slider)
-milp_charge_upper_kw = discharge_power_kw  # omvormerlimiet = aansluitingslimiet
+# MILP: laden tot max afname-limiet, ontladen tot injectie-limiet
+milp_charge_upper_kw = max_afname_kw   # afname-limiet (HOGER dan injectie!)
 # Backwards-compat
 max_power_kw = discharge_power_kw
 
-# Capaciteitstarief berekening
-cap_peak_kw    = max(2.5, charge_power_kw)
+# Capaciteitstarief berekening — gebaseerd op AFNAME-limiet (niet injectie)
+cap_peak_kw    = max(2.5, charge_power_kw)  # rule-based piek
 cap_monthly    = cap_peak_kw * 60 / 12       # €/maand bij deze piek
 cap_forfait    = 2.5 * 60 / 12               # €12.50/maand minimumforfait
 cap_extra      = cap_monthly - cap_forfait   # extra boven forfait
@@ -796,8 +798,8 @@ if st.session_state.milp_pending:
             milp_schedule, milp_summary = optimize_battery_schedule(
                 milp_input,
                 battery_kwh=battery_kwh,
-                max_power_kw=discharge_power_kw,
-                charge_power_kw=milp_charge_upper_kw,  # omvormerlimiet, MILP kiest zelf optimale piek
+                max_power_kw=discharge_power_kw,         # injectie-limiet
+                charge_power_kw=milp_charge_upper_kw,    # afname-limiet
                 min_soc=min_soc_pct / 100,
                 min_end_soc=min_end_soc_pct / 100,
                 initial_soc=st.session_state.get("milp_initial_soc", 0.50),
@@ -829,8 +831,8 @@ if st.session_state.get("scenarios_pending"):
     init_soc   = st.session_state.get("milp_initial_soc", 0.50)
     milp_args  = dict(
         battery_kwh=battery_kwh,
-        max_power_kw=discharge_power_kw,
-        charge_power_kw=milp_charge_upper_kw,  # omvormerlimiet, MILP kiest zelf optimale piek
+        max_power_kw=discharge_power_kw,         # injectie-limiet (5 of 10 kW)
+        charge_power_kw=milp_charge_upper_kw,    # afname-limiet (9.2 of 15.9 kW)
         min_soc=min_soc_pct / 100,
         min_end_soc=min_end_soc_pct / 100,
         initial_soc=init_soc,
@@ -2088,120 +2090,124 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
     with sz_c3:
         use_solar_sz  = st.checkbox("Solar meenemen in sweep", value=own_kwp > 0,
                                      help="Gebruikt eigen PV-vermogen van de sidebar")
-        sz_inverter   = st.number_input(
-            "Omvormervermogen sweep (kW)", 0.5, max_inj_kw, float(discharge_power_kw), 0.5,
-            help=f"Max. laad/ontlaadvermogen voor de sizing sweep. "
-                 f"Aansluitingslimiet: {{max_inj_kw:.0f}} kW "
-                 f"({{'driefasig' if is_driefasig else 'monofase'}})."
+        sz_injectie = st.number_input(
+            "Injectievermogen sweep (kW)", 0.5, max_inj_kw, float(discharge_power_kw), 0.5,
+            help=f"Max ontlaadvermogen naar net. Wettelijke limiet: {max_inj_kw:.0f} kW."
+        )
+        sz_afname = st.number_input(
+            "Afnamevermogen sweep (kW)", 0.5, max_afname_kw, float(max_afname_kw), 0.5,
+            help=f"Max laadvermogen van net. Wettelijke limiet: {max_afname_kw} kW."
         )
 
-    if not df.empty and st.button(
-            "🚀 Start Battery Sizing Analyse", type="primary",
-            key="btn_sizing", use_container_width=True):
+        if not df.empty and st.button(
+                "🚀 Start Battery Sizing Analyse", type="primary",
+                key="btn_sizing", use_container_width=True):
 
-        battery_sizes = list(range(int(sizes_min), int(sizes_max) + 1, int(sizes_step)))
-        if not battery_sizes:
-            st.error("Ongeldige sweep-instellingen.")
-        else:
-            with st.spinner(f"MILP sweep over {len(battery_sizes)} groottes "
-                            f"({sizes_min}–{sizes_max} kWh, stap {sizes_step} kWh)…"):
-                try:
-                    # Solar data ophalen indien gevraagd
-                    solar_sz = None
-                    if use_solar_sz and ELIA_AVAILABLE and own_kwp > 0:
-                        try:
-                            ec_sz   = EliaClient()
-                            df_sol_sz = ec_sz.get_solar_forecast()
-                            if df_sol_sz.empty:
-                                df_sol_sz = ec_sz.get_historical_solar(sel_start, sel_end)
-                            if not df_sol_sz.empty:
-                                solar_sz = estimate_own_solar_kwh(df_sol_sz, own_kwp=own_kwp)
-                        except Exception:
-                            solar_sz = None
-
-                    sz_results = battery_sizing_analysis(
-                        sim_df,
-                        battery_sizes_kwh=[float(s) for s in battery_sizes],
-                        max_power_kw=float(sz_inverter),
-                        min_soc=min_soc_pct / 100,
-                        min_end_soc=min_end_soc_pct / 100,
-                        initial_soc=initial_soc_pct / 100,
-                        capex_per_kwh=float(capex_kwh),
-                        lifespan_years=float(lifespan),
-                        solar_kwh_per_slot=solar_sz,
+            battery_sizes = list(range(int(sizes_min), int(sizes_max) + 1, int(sizes_step)))
+            if not battery_sizes:
+                st.error("Ongeldige sweep-instellingen.")
+            else:
+                # Vollaad-check: waarschuw als batterij nooit volgeladen kan worden op 1 dag
+                max_chargeable_day = float(sz_afname) * 0.959 * 24  # max kWh/dag bij doorlopend laden
+                oversized = [kwh for kwh in battery_sizes if kwh * 0.9 > max_chargeable_day]
+                if oversized:
+                    st.warning(
+                        f"⚠️ Batterijen groter dan **{max_chargeable_day/0.9:.0f} kWh** kunnen bij "
+                        f"{sz_afname:.1f} kW afnamevermogen nooit volledig worden opgeladen in 24u. "
+                        f"Onrealistisch voor: {oversized} kWh. "
+                        f"Resultaten voor die groottes zijn gebaseerd op partieel laden — "
+                        f"grotere batterij ≠ meer opbrengst in dit geval."
                     )
-                    st.session_state["sizing_results"] = sz_results
-                except Exception as e:
-                    st.error(f"Sizing analyse fout: {e}")
 
-    # Resultaten tonen
+                with st.spinner(f"MILP sweep over {len(battery_sizes)} groottes "
+                                f"({sizes_min}–{sizes_max} kWh, stap {sizes_step} kWh)…"):
+                    try:
+                        solar_sz = None
+                        if use_solar_sz and ELIA_AVAILABLE and own_kwp > 0:
+                            try:
+                                ec_sz     = EliaClient()
+                                df_sol_sz = ec_sz.get_solar_forecast()
+                                if df_sol_sz.empty:
+                                    df_sol_sz = ec_sz.get_historical_solar(sel_start, sel_end)
+                                if not df_sol_sz.empty:
+                                    solar_sz = estimate_own_solar_kwh(df_sol_sz, own_kwp=own_kwp)
+                            except Exception:
+                                solar_sz = None
+
+                        sz_results = battery_sizing_analysis(
+                            sim_df,
+                            battery_sizes_kwh=[float(s) for s in battery_sizes],
+                            max_power_kw=float(sz_injectie),     # injectie-limiet
+                            charge_power_kw=float(sz_afname),    # afname-limiet
+                            min_soc=min_soc_pct / 100,
+                            min_end_soc=min_end_soc_pct / 100,
+                            initial_soc=initial_soc_pct / 100,
+                            capex_per_kwh=float(capex_kwh),
+                            lifespan_years=float(lifespan),
+                            solar_kwh_per_slot=solar_sz,
+                        )
+                        st.session_state["sizing_results"] = sz_results
+                    except Exception as e:
+                        st.error(f"Sizing analyse fout: {e}")
+
     if "sizing_results" in st.session_state and st.session_state["sizing_results"] is not None:
-        sr = st.session_state["sizing_results"]
+        sr    = st.session_state["sizing_results"]
         valid = sr[sr["_netto_year"] > -900].copy()
 
         if not valid.empty:
-            # Optimaal punt
             best_idx   = valid["_netto_year"].idxmax()
             best_kwh   = valid.loc[best_idx, "Capaciteit (kWh)"]
             best_netto = valid.loc[best_idx, "_netto_year"]
             best_irr   = valid.loc[best_idx, "_irr"]
             best_tv    = valid.loc[best_idx, "_terugverd"]
 
-            # KPI banner
+            # Vollaad-check voor aanbevolen grootte
+            max_chargeable_day_sz = float(sr.get("_sz_afname", sz_afname if "sz_afname" in dir() else 9.2)) * 0.959 * 24
+            if best_kwh * 0.9 > max_chargeable_day_sz:
+                st.error(
+                    f"⚠️ De aanbevolen batterij van **{best_kwh:.0f} kWh** kan bij het ingestelde "
+                    f"afnamevermogen NOOIT volledig worden opgeladen! "
+                    f"Verklein de sweep-range of verhoog het afnamevermogen."
+                )
+
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("🏆 Optimale grootte",  f"{best_kwh:.0f} kWh",
-                      help="Hoogste netto jaarwinst na CAPEX en capaciteitstarief")
-            k2.metric("Netto winst/jaar",      f"{best_netto:+.0f} €",
-                      help="Arbitrage-opbrengst − CAPEX/jaar − capaciteitstarief")
+            k1.metric("🏆 Optimale grootte",  f"{best_kwh:.0f} kWh")
+            k2.metric("Netto winst/jaar",      f"{best_netto:+.0f} €")
             k3.metric("Terugverdientijd",      f"{best_tv:.1f} jaar")
-            k4.metric("IRR",                   f"{best_irr:.1f} %",
-                      help="Interne rendabiliteitvoet (revenue / totale CAPEX)")
+            k4.metric("IRR",                   f"{best_irr:.1f} %")
 
-            # Hoofdgrafiek: gestapelde componenten
-            import plotly.graph_objects as go_sz
-            fig_sz = go_sz.Figure()
-
-            fig_sz.add_trace(go_sz.Bar(
+            fig_sz = go.Figure()
+            fig_sz.add_trace(go.Bar(
                 x=valid["Capaciteit (kWh)"], y=valid["_rev_year"],
                 name="Arbitrage-opbrengst (€/jr)", marker_color="#27AE60", opacity=0.85))
-            fig_sz.add_trace(go_sz.Bar(
+            fig_sz.add_trace(go.Bar(
                 x=valid["Capaciteit (kWh)"], y=-valid["_capex_year"],
                 name="CAPEX/jaar (€)", marker_color="#E74C3C", opacity=0.85))
-            fig_sz.add_trace(go_sz.Bar(
+            fig_sz.add_trace(go.Bar(
                 x=valid["Capaciteit (kWh)"], y=-valid["_cap_tar_year"],
                 name="Cap.tarief/jaar (€)", marker_color="#E67E22", opacity=0.85))
-
-            # Netto als lijn
-            fig_sz.add_trace(go_sz.Scatter(
+            fig_sz.add_trace(go.Scatter(
                 x=valid["Capaciteit (kWh)"], y=valid["_netto_year"],
                 name="Netto winst/jaar (€)",
                 line=dict(color="white", width=3),
-                mode="lines+markers",
-                marker=dict(size=8)))
-
-            # Markeer optimum
+                mode="lines+markers", marker=dict(size=8)))
             fig_sz.add_vline(
                 x=best_kwh, line_dash="dash", line_color="#F1C40F",
                 annotation_text=f"Optimum: {best_kwh:.0f} kWh",
                 annotation_position="top right")
-
             fig_sz.update_layout(
                 title=f"Battery Sizing Analyse — {capex_kwh}€/kWh CAPEX, {lifespan}j levensduur",
-                xaxis_title="Batterijcapaciteit (kWh)",
-                yaxis_title="€ per jaar",
-                barmode="relative",
-                legend=dict(x=0, y=1.12, orientation="h"),
-                xaxis=dict(dtick=sizes_step),
+                xaxis_title="Batterijcapaciteit (kWh)", yaxis_title="€ per jaar",
+                barmode="relative", legend=dict(x=0, y=1.12, orientation="h"),
             )
             st.plotly_chart(fig_sz, use_container_width=True)
 
-            # IRR + terugverdientijd grafiek
-            fig_irr = go_sz.Figure()
-            fig_irr.add_trace(go_sz.Scatter(
+            fig_irr = go.Figure()
+            fig_irr.add_trace(go.Scatter(
                 x=valid["Capaciteit (kWh)"], y=valid["_irr"],
                 name="IRR (%)", line=dict(color="#3498DB", width=2),
-                mode="lines+markers", yaxis="y"))
-            fig_irr.add_trace(go_sz.Scatter(
+                mode="lines+markers"))
+            fig_irr.add_trace(go.Scatter(
                 x=valid["Capaciteit (kWh)"], y=valid["_terugverd"].clip(upper=30),
                 name="Terugverdientijd (jaar)",
                 line=dict(color="#E67E22", width=2, dash="dot"),
@@ -2213,80 +2219,19 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
                 yaxis2=dict(title="Terugverdientijd (jaar)", overlaying="y",
                             side="right", range=[0, 30]),
                 legend=dict(x=0, y=1.12, orientation="h"),
-                xaxis=dict(dtick=sizes_step),
             )
             st.plotly_chart(fig_irr, use_container_width=True)
 
-            # Detailtabel
             display_cols = ["Capaciteit (kWh)", "Rev. jaar (€)", "CAPEX jaar (€)",
                             "Cap.tarief jaar (€)", "Netto winst jaar (€)",
                             "Terugverdientijd (j)", "IRR (%)", "MILP laadpiek (kW)"]
             display_cols = [c for c in display_cols if c in sr.columns]
-            st.dataframe(sr[display_cols], use_container_width=True, hide_index=True,
-                         column_config={
-                             "Netto winst jaar (€)": st.column_config.NumberColumn(format="%.0f"),
-                             "IRR (%)":               st.column_config.NumberColumn(format="%.1f"),
-                             "Terugverdientijd (j)":  st.column_config.NumberColumn(format="%.1f"),
-                         })
+            st.dataframe(sr[display_cols], use_container_width=True, hide_index=True)
 
             st.caption(
-                f"ℹ️ **Gebaseerd op {len(sim_df)/4:.0f}u ({len(sim_df)*0.25/24:.0f} dagen) "
-                f"echte prijsdata**, geëxtrapoleerd naar 1 jaar. "
-                f"Rekening gehouden met: MILP-optimale arbitrage, capaciteitstarief, "
-                f"{'solar self-consumption ('+str(own_kwp)+' kWp), ' if use_solar_sz and own_kwp > 0 else ''}"
+                f"ℹ️ Gebaseerd op {len(sim_df)*0.25/24:.0f} dagen echte prijsdata. "
+                f"Injectie: {sz_injectie:.1f} kW | Afname: {sz_afname:.1f} kW. "
                 f"CAPEX €{capex_kwh}/kWh over {lifespan} jaar. "
-                f"Exclusief: onderhoudskosten, verzekering, netaansluitingskosten, "
-                f"eventuele subsidies."
+                f"Exclusief: onderhoudskosten, subsidies."
             )
-        else:
-            st.warning("Geen geldige resultaten — controleer de ingevoerde parameters.")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Intraday Pricing (placeholder — EPEX SPOT data niet gratis beschikbaar)
-# ─────────────────────────────────────────────────────────────────────────────
-with st.expander("🔄 Intraday Pricing (EPEX SPOT)", expanded=False):
-    st.markdown("""
-    **Intraday markt** (EPEX SPOT / XBID) is continu open tot 60 min voor levering.
-
-    | Aspect | Status |
-    |---|---|
-    | Data bron | EPEX SPOT (niet gratis publiek) |
-    | Alternatief | Electricity Maps — biedt intraday API voor commerciële klanten |
-    | Implementatie | `intraday_client.py` klaar zodra API-toegang beschikbaar is |
-    | Relevantie | Hoogst voor real-time bijsturing (< 4u voor levering) |
-
-    **Strategie zodra beschikbaar:**
-    - Vergelijk day-ahead prijs met actuele intraday prijs
-    - Als intraday >> day-ahead: versneld ontladen
-    - Als intraday << day-ahead (of negatief): versneld laden
-    - Intraday-prijzen reflecteren real-time onbalans en weerswijzigingen (PV-forecast updates)
-    """)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Fluvius + NODES
-# ─────────────────────────────────────────────────────────────────────────────
-with st.expander("🌐 Fluvius Netcongestie & NODES Flex Market", expanded=False):
-    fc1, fc2 = st.columns(2)
-    with fc1:
-        st.subheader("📍 Fluvius Congestie")
-        if CONGESTION_AVAILABLE:
-            gemeente = st.text_input("Gemeente", value="Gent", key="fluvius_gem")
-            if st.button("Ophalen", key="btn_fluvius"):
-                cc = CongestionClient()
-                st.json(cc.get_congestion_summary(gemeente))
-                df_c = cc.get_expected_congestion_hours(gemeente)
-                if not df_c.empty: st.dataframe(df_c, use_container_width=True)
-        else:
-            st.warning("congestion_client.py niet gevonden.")
-    with fc2:
-        st.subheader("🔌 NODES Flex Market")
-        if NODES_AVAILABLE:
-            if st.button("Ophalen", key="btn_nodes"):
-                nc = NodesClient()
-                st.json(nc.get_market_summary())
-                df_fx = nc.get_available_flex_requests()
-                if not df_fx.empty: st.dataframe(df_fx, use_container_width=True)
-                else: st.info("Geen open flex requests.")
-        else:
-            st.warning("nodes_client.py niet gevonden.")

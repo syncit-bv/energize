@@ -509,6 +509,7 @@ def battery_sizing_analysis(
     prices_df: pd.DataFrame,
     battery_sizes_kwh: list = None,
     max_power_kw: float = 5.0,
+    charge_power_kw: Optional[float] = None,
     min_soc: float = 0.10,
     min_end_soc: float = 0.20,
     initial_soc: float = 0.50,
@@ -555,7 +556,7 @@ def battery_sizing_analysis(
                     wind_price_adj_per_slot,
                     battery_kwh=kwh,
                     max_power_kw=max_power_kw,
-                    charge_power_kw=max_power_kw,
+                    charge_power_kw=_charge_kw,
                     min_soc=min_soc, min_end_soc=min_end_soc,
                     initial_soc=initial_soc,
                     cap_eur_per_kw_year=cap_eur_per_kw_year,
@@ -565,17 +566,18 @@ def battery_sizing_analysis(
                 sch, s = optimize_battery_schedule_solar(
                     prices_df, solar_kwh_per_slot,
                     battery_kwh=kwh, max_power_kw=max_power_kw,
-                    charge_power_kw=max_power_kw,
+                    charge_power_kw=_charge_kw,
                     min_soc=min_soc, min_end_soc=min_end_soc,
                     initial_soc=initial_soc,
                     cap_eur_per_kw_year=cap_eur_per_kw_year,
                     cap_min_kw=cap_min_kw,
                 )
             else:
+                _charge_kw = charge_power_kw if charge_power_kw is not None else max_power_kw
                 sch, s = optimize_battery_schedule(
                     prices_df,
                     battery_kwh=kwh, max_power_kw=max_power_kw,
-                    charge_power_kw=max_power_kw,
+                    charge_power_kw=_charge_kw,
                     min_soc=min_soc, min_end_soc=min_end_soc,
                     initial_soc=initial_soc,
                     cap_eur_per_kw_year=cap_eur_per_kw_year,
