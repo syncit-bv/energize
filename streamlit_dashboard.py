@@ -2235,3 +2235,158 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
                 f"Exclusief: onderhoudskosten, subsidies."
             )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mono vs Driefasig Vergelijkingstabel
+# ─────────────────────────────────────────────────────────────────────────────
+with st.expander("⚡ Mono vs Driefasig — Gedetailleerde Vergelijkingstabel", expanded=False):
+    st.markdown(
+        "Volledige kostprijs- en opbrengstanalyse naast elkaar, "
+        "zodat je in één oogopslag ziet welke opstelling het meest rendabel is."
+    )
+
+    cmp_c1, cmp_c2, cmp_c3 = st.columns(3)
+    with cmp_c1:
+        cmp_capex  = st.number_input("CAPEX (€/kWh)", 10, 1000, 88, 1, key="cmp_capex",
+                       help="Kostprijs per kWh batterijcapaciteit")
+        cmp_leven  = st.number_input("Levensduur (jaar)", 5, 25, 12, 1, key="cmp_leven")
+    with cmp_c2:
+        cmp_kwh_m  = st.number_input("Batterij monofase (kWh)", 5, 100, 15, 5, key="cmp_kwh_m",
+                       help="Optimale grootte voor monofase (typisch 15 kWh)")
+        cmp_kwh_d  = st.number_input("Batterij driefasig (kWh)", 5, 100, 25, 5, key="cmp_kwh_d",
+                       help="Optimale grootte voor driefasig (typisch 25 kWh)")
+    with cmp_c3:
+        cmp_onderhoud = st.number_input("Onderhoudskosten (€/jr)", 0, 500, 50, 10, key="cmp_onderhoud")
+        cmp_subsidie  = st.number_input("Subsidie / premie (€)", 0, 5000, 0, 100, key="cmp_subsidie",
+                          help="Éénmalige subsidie (bv. Vlaanderen, gemeente)")
+
+    if not df.empty and st.button("📊 Bereken vergelijkingstabel",
+                                   type="primary", key="btn_cmp",
+                                   use_container_width=True):
+        with st.spinner("MILP berekeningen mono- en driefasig…"):
+            try:
+                cmp_results = {}
+                for naam, (inj, afl, kwh) in {
+                    "Monofase":  (5.0,  9.2,  cmp_kwh_m),
+                    "Driefasig": (10.0, 15.9, cmp_kwh_d),
+                }.items():
+                    r = battery_sizing_analysis(
+                        sim_df, battery_sizes_kwh=[float(kwh)],
+                        max_power_kw=inj, charge_power_kw=afl,
+                        min_soc=min_soc_pct/100, initial_soc=initial_soc_pct/100,
+                        capex_per_kwh=float(cmp_capex), lifespan_years=float(cmp_leven),
+                    )
+                    row        = r.iloc[0]
+                    n_days_sim = len(sim_df) * 0.25 / 24.0
+                    arbitrage_yr = row["_rev_year"]
+                    cap_tar_yr   = row["_cap_tar_year"]
+                    capex_tot    = kwh * cmp_capex
+                    capex_yr     = capex_tot / cmp_leven
+                    sub_yr       = cmp_subsidie / cmp_leven
+                    netto_yr     = arbitrage_yr - cap_tar_yr - capex_yr - cmp_onderhoud + sub_yr
+                    netto_cap    = capex_tot - cmp_subsidie
+                    tv           = netto_cap / max(arbitrage_yr - cap_tar_yr - cmp_onderhoud, 0.01)
+                    irr          = (arbitrage_yr - cap_tar_yr - cmp_onderhoud) / max(netto_cap, 1) * 100
+                    cmp_results[naam] = {
+                        "kwh": kwh, "inj_kw": inj, "afl_kw": afl,
+                        "milp_piek":    float(row["MILP laadpiek (kW)"]),
+                        "arbitrage_yr": arbitrage_yr,
+                        "cap_tar_yr":   cap_tar_yr,
+                        "onderhoud_yr": float(cmp_onderhoud),
+                        "subsidie":     float(cmp_subsidie),
+                        "sub_yr":       sub_yr,
+                        "capex_tot":    capex_tot,
+                        "capex_yr":     capex_yr,
+                        "netto_yr":     netto_yr,
+                        "irr":          irr,
+                        "tv":           tv,
+                        "lever":        cmp_leven,
+                    }
+                st.session_state["cmp_results"] = cmp_results
+            except Exception as e:
+                st.error(f"Vergelijkingsberekening fout: {e}")
+
+    if st.session_state.get("cmp_results"):
+        cr = st.session_state["cmp_results"]
+        mo = cr.get("Monofase", {})
+        dr = cr.get("Driefasig", {})
+
+        if mo and dr:
+            diff_netto = dr["netto_yr"] - mo["netto_yr"]
+            diff_total = diff_netto * dr["lever"]
+            winner     = "Driefasig" if diff_netto > 0 else "Monofase"
+
+            if diff_netto > 0:
+                st.success(f"🏆 **Driefasig** wint: +{abs(diff_netto):,.0f} €/jaar meer netto. "
+                           f"Over {dr['lever']} jaar: +{abs(diff_total):,.0f} € extra.")
+            else:
+                st.info(f"🏆 **Monofase** wint: +{abs(diff_netto):,.0f} €/jaar meer netto. "
+                        f"Driefasige meerkosten niet terugverdiend.")
+
+            def be(v, sign=""):
+                """Formatteer als Belgisch euro-bedrag."""
+                s = f"{abs(v):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+                return f"{sign}{s}" if sign else s
+
+            sections = [
+                ("🏗️ INVESTERING", [
+                    ("Batterijcapaciteit",        lambda c: f"{c['kwh']} kWh",                                       ""),
+                    ("Totale investeringskost",   lambda c: be(c["capex_tot"]),                                       "eenmalig"),
+                    ("Subsidie / premie",         lambda c: be(c["subsidie"], "- ") if c["subsidie"] > 0 else "—",  "aftrek"),
+                    ("Netto te investeren",       lambda c: be(c["capex_tot"] - c["subsidie"]),                      "effectieve kost"),
+                    ("Afschrijving per jaar",     lambda c: be(c["capex_yr"], "- "),                                 f"{c['lever']}j levensduur"),
+                ]),
+                ("⚡ TECHNISCHE LIMIETEN", [
+                    ("Max. injectie op net",      lambda c: f"{c['inj_kw']:.0f} kW",     "Fluvius-limiet"),
+                    ("Max. afname van net",       lambda c: f"{c['afl_kw']:.1f} kW",     "Fluvius-limiet"),
+                    ("MILP gekozen laadpiek",     lambda c: f"{c['milp_piek']:.1f} kW",  "Optimaal per MILP"),
+                ]),
+                ("💶 JAARLIJKSE FINANCIËN", [
+                    ("+ Arbitrage-opbrengst",     lambda c: be(c["arbitrage_yr"], "+ "), "laden laag → ontladen hoog"),
+                    ("− Capaciteitstarief",       lambda c: be(c["cap_tar_yr"],   "- "), "piek × €60/kW/jaar"),
+                    ("− Onderhoudskosten",        lambda c: be(c["onderhoud_yr"], "- "), "geschat"),
+                    ("− Afschrijving CAPEX",      lambda c: be(c["capex_yr"],     "- "), ""),
+                    ("+ Subsidie (jaarequiv.)",   lambda c: be(c["sub_yr"],       "+ ") if c["subsidie"] > 0 else "—", ""),
+                ]),
+                ("🏆 RESULTAAT", [
+                    ("Netto winst per jaar",      lambda c: be(c["netto_yr"],        "+ "), "na alle kosten"),
+                    ("IRR",                       lambda c: f"{c['irr']:.1f} %",           "opbrengst / investering"),
+                    ("Terugverdientijd",          lambda c: f"{c['tv']:.1f} jaar",          ""),
+                    ("Totale winst (looptijd)",   lambda c: be(c["netto_yr"] * c["lever"], "+ "), f"over {c['lever']} jaar"),
+                ]),
+            ]
+
+            for sec_title, sec_rows in sections:
+                st.markdown(f"**{sec_title}**")
+                tbl = []
+                for label, val_fn, note in sec_rows:
+                    tbl.append({
+                        "Onderdeel":    label,
+                        "Toelichting":  note,
+                        "⚡ Monofase":  val_fn(mo),
+                        "⚡⚡⚡ Driefasig": val_fn(dr),
+                    })
+                st.dataframe(pd.DataFrame(tbl), use_container_width=True,
+                             hide_index=True,
+                             column_config={
+                                 "Onderdeel":       st.column_config.TextColumn(width="medium"),
+                                 "Toelichting":     st.column_config.TextColumn(width="medium"),
+                                 "⚡ Monofase":     st.column_config.TextColumn(width="small"),
+                                 "⚡⚡⚡ Driefasig":  st.column_config.TextColumn(width="small"),
+                             })
+
+            # KPI vergelijking
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Monofase netto/jr",  f"{mo['netto_yr']:,.0f} €".replace(",", "."))
+            k2.metric("Driefasig netto/jr", f"{dr['netto_yr']:,.0f} €".replace(",", "."),
+                      delta=f"+{diff_netto:,.0f} €".replace(",", ".") if diff_netto > 0 else f"{diff_netto:,.0f} €".replace(",", "."))
+            k3.metric("Monofase TV",        f"{mo['tv']:.1f} jaar")
+            k4.metric("Driefasig TV",       f"{dr['tv']:.1f} jaar",
+                      delta=f"{dr['tv']-mo['tv']:+.1f} jaar", delta_color="inverse")
+
+            st.caption(
+                f"ℹ️ Berekend op MILP-optimalisatie op de geselecteerde periode "
+                f"({len(sim_df)*0.25/24:.0f} dagen), geëxtrapoleerd naar 1 jaar. "
+                "Exclusief: netaansluitingskosten, omvormerkosten, belastingen. "
+                "Geen garantie voor toekomstig rendement."
+            )
