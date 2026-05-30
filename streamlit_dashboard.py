@@ -16,8 +16,41 @@ from milp_optimizer import (
     optimize_battery_schedule_solar,
     optimize_battery_schedule_wind_solar,
     estimate_own_solar_kwh,
-    battery_sizing_analysis,
+    battery_sizing_analysis as _battery_sizing_raw,
 )
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _battery_sizing_cached(data_hash: str, prices_df, battery_sizes_kwh,
+                             max_power_kw, charge_power_kw,
+                             min_soc, initial_soc, capex_per_kwh, lifespan_years):
+    """Interne gecachede kern — niet rechtstreeks aanroepen."""
+    return _battery_sizing_raw(
+        prices_df,
+        battery_sizes_kwh=list(battery_sizes_kwh),
+        max_power_kw=max_power_kw, charge_power_kw=charge_power_kw,
+        min_soc=min_soc, initial_soc=initial_soc,
+        capex_per_kwh=capex_per_kwh, lifespan_years=lifespan_years,
+    )
+
+def battery_sizing_analysis(prices_df, battery_sizes_kwh=None,
+                              max_power_kw=5.0, charge_power_kw=None,
+                              min_soc=0.10, min_end_soc=0.20, initial_soc=0.50,
+                              capex_per_kwh=500.0, lifespan_years=12.0, **_):
+    """
+    Gecachede wrapper — identieke signature als de raw functie.
+    Cache-key = hash van data + parameters. Geen aanpassing nodig aan call sites.
+    Tweede aanroep met zelfde data en params: onmiddellijk resultaat.
+    """
+    data_hash = (f"{len(prices_df)}_"
+                 f"{prices_df['price_eur_mwh'].sum():.2f}_"
+                 f"{max_power_kw}_{charge_power_kw}_{capex_per_kwh}_{lifespan_years}_"
+                 f"{sorted(battery_sizes_kwh or [])}")
+    return _battery_sizing_cached(
+        data_hash, prices_df,
+        tuple(sorted(battery_sizes_kwh or [])),
+        max_power_kw, charge_power_kw,
+        min_soc, initial_soc, capex_per_kwh, lifespan_years,
+    )
 
 try:
     from entsoe_client import EntsoeClient
@@ -2155,9 +2188,8 @@ with st.expander("🔋 Battery Sizing Advisor — Optimale batterijgrootte", exp
                             except Exception:
                                 solar_sz = None
 
-                        _sz_hash = f"{len(sz_data)}_{sz_data['price_eur_mwh'].sum():.1f}_{sz_afname}_{sz_injectie}_{capex_kwh}_{lifespan}"
                         sz_results = battery_sizing_analysis(
-                            _sz_hash, sz_data,
+                            sz_data,
                             battery_sizes_kwh=[float(s) for s in battery_sizes],
                             max_power_kw=float(sz_injectie),
                             charge_power_kw=float(sz_afname),
@@ -2302,9 +2334,8 @@ with st.expander("⚡ Mono vs Driefasig — Gedetailleerde Vergelijkingstabel", 
                     "Monofase":  (5.0,  9.2,  cmp_kwh_m),
                     "Driefasig": (10.0, 15.9, cmp_kwh_d),
                 }.items():
-                    _cmp_hash = f"{len(cmp_data)}_{cmp_data['price_eur_mwh'].sum():.1f}_{inj}_{afl}_{kwh}_{cmp_capex}_{cmp_leven}"
                     r = battery_sizing_analysis(
-                        _cmp_hash, cmp_data, battery_sizes_kwh=[float(kwh)],
+                        cmp_data, battery_sizes_kwh=[float(kwh)],
                         max_power_kw=inj, charge_power_kw=afl,
                         min_soc=min_soc_pct/100, initial_soc=initial_soc_pct/100,
                         capex_per_kwh=float(cmp_capex), lifespan_years=float(cmp_leven),
