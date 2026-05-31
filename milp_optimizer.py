@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MILP Optimizer for EMS Belgium — v1.8
+MILP Optimizer for EMS Belgium — v1.9
 ======================================
 Drie optimalisatie-niveaus:
   1. optimize_battery_schedule()        — standaard arbitrage + capaciteitstarief
@@ -383,6 +383,151 @@ def _align_wind_adj(wind_adj_series: pd.Series, prices_df: pd.DataFrame) -> list
             price_idx = price_idx.tz_localize("UTC")
         aligned = adj_indexed.reindex(price_idx, method="nearest", tolerance="20min").fillna(0.0)
         return aligned.tolist()
+    except Exception:
+        return [0.0] * len(prices_df)
+
+
+def optimize_battery_schedule_imbalance(
+    prices_df: pd.DataFrame,
+    imbalance_adj_per_slot: pd.Series,
+    imbalance_weight: float = 0.15,
+    solar_kwh_per_slot: "pd.Series | None" = None,
+    battery_kwh: float = 10.0,
+    max_power_kw: float = 5.0,
+    charge_power_kw: Optional[float] = None,
+    min_soc: float = 0.10,
+    min_end_soc: float = 0.20,
+    efficiency: float = 0.92,
+    initial_soc: float = 0.50,
+    time_horizon_hours: Optional[int] = None,
+    label: str = "MILP+DA+Imbalance",
+    execute_until: Optional[date] = None,
+    cap_eur_per_kw_year: float = CAP_EUR_PER_KW_YEAR,
+    cap_min_kw: float = CAP_MIN_KW,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    MILP met day-ahead prijzen gecorrigeerd door imbalance signaal.
+
+    Imbalance integratie:
+      imbalance_adj_per_slot (pd.Series, €/MWh per slot):
+        MIP/MDP gemiddelde minus day-ahead prijs.
+        Positief = markt verwacht hoger dan day-ahead → meer ontladen
+        Negatief = markt verwacht lager → meer laden
+
+      imbalance_weight (default 0.15 = 15%):
+        Conservatief gewicht — imbalance is retroactief en volatiel.
+        Effectieve prijs = day_ahead × (1 - w) + imbalance_mid × w
+
+      Nota: imbalance_adj enkel in OBJECTIVE, NIET in revenue berekening.
+            Revenue = werkelijke day-ahead prijs (wat omvormers daadwerkelijk ontvangen).
+
+    Verschil met MILP+Wind:
+      Wind → prijsverwachting VOOR productie (day-ahead corr.)
+      Imbalance → marktfeedback UIT de afgelopen kwartieren (retroactief signaal)
+      Combineer beide voor maximale prijs-anticipatie.
+    """
+    df = _select_slots(prices_df, time_horizon_hours)
+    if df.empty:
+        raise ValueError("Geen prijsdata.")
+
+    discharge_kw = max_power_kw
+    charge_kw    = min(charge_power_kw if charge_power_kw is not None else max_power_kw,
+                       discharge_kw)
+
+    T        = len(df)
+    dt_h     = 0.25
+    eta      = efficiency ** 0.5
+    n_days   = T * dt_h / 24.0
+    n_months = n_days / 30.44
+
+    if execute_until is not None:
+        exec_mask = pd.to_datetime(df["datetime"]).dt.date <= execute_until
+    else:
+        exec_mask = pd.Series([True] * T)
+    n_execute = int(exec_mask.sum())
+
+    imb_adj_vals = _align_imbalance_adj(imbalance_adj_per_slot, df, imbalance_weight)
+    solar_vals   = _align_solar(solar_kwh_per_slot, df) if solar_kwh_per_slot is not None                    else [0.0] * T
+
+    prob          = pulp.LpProblem("Battery_Imbalance_MILP", pulp.LpMaximize)
+    charge_grid   = pulp.LpVariable.dicts("CG", range(T), lowBound=0, cat="Continuous")
+    charge_solar  = pulp.LpVariable.dicts("CS", range(T), lowBound=0, cat="Continuous")
+    discharge     = pulp.LpVariable.dicts("D",  range(T), lowBound=0, cat="Continuous")
+    soc           = pulp.LpVariable.dicts("S",  range(T+1),
+                                          lowBound=min_soc * battery_kwh,
+                                          upBound=battery_kwh, cat="Continuous")
+    peak_charge   = pulp.LpVariable("PeakCharge", lowBound=cap_min_kw,
+                                    upBound=charge_kw, cat="Continuous")
+
+    cap_cost = peak_charge * (cap_eur_per_kw_year / 12.0) * n_months
+
+    # Objectief: day-ahead + gewogen imbalance correctie
+    prob += (
+        pulp.lpSum(
+            discharge[t]   * (df.iloc[t]["price_eur_mwh"] + imb_adj_vals[t]) / 1000
+            - charge_grid[t] * (df.iloc[t]["price_eur_mwh"] + imb_adj_vals[t]) / 1000
+            for t in range(T)
+        ) - cap_cost,
+        "Revenue_Imbalance",
+    )
+
+    prob += soc[0] == initial_soc * battery_kwh, "Init_SOC"
+    prob += soc[T] >= min_end_soc * battery_kwh, "Min_End_SOC"
+    max_e_dis = discharge_kw * dt_h
+
+    for t in range(T):
+        solar_avail = float(solar_vals[t])
+        prob += (soc[t+1] == soc[t]
+                 + eta * (charge_grid[t] + charge_solar[t])
+                 - discharge[t] / eta), f"Dyn_{t}"
+        prob += charge_grid[t]  <= peak_charge * dt_h, f"CG_{t}"
+        prob += charge_solar[t] <= solar_avail,          f"CS_{t}"
+        prob += charge_grid[t] + charge_solar[t] <= max_e_dis, f"Cmax_{t}"
+        prob += discharge[t]   <= max_e_dis,                    f"Dmax_{t}"
+
+    result_df, summary = _solve_and_extract(
+        prob, df, T, battery_kwh, charge_grid, discharge, soc,
+        label=label,
+        extra_charge=charge_solar if solar_kwh_per_slot is not None else None,
+        solar_vals=solar_vals if solar_kwh_per_slot is not None else None,
+        exec_mask=exec_mask, n_execute=n_execute,
+        peak_charge_var=peak_charge,
+        discharge_kw=discharge_kw, charge_kw=charge_kw,
+        cap_eur_per_kw_year=cap_eur_per_kw_year, cap_min_kw=cap_min_kw,
+        n_days=n_days,
+    )
+    summary["imbalance_weight"]    = imbalance_weight
+    summary["imbalance_adj_slots"] = sum(1 for v in imb_adj_vals if abs(v) > 1)
+    return result_df, summary
+
+
+def _align_imbalance_adj(
+    imbalance_series: pd.Series,
+    prices_df: pd.DataFrame,
+    weight: float = 0.15,
+) -> list:
+    """
+    Lijn imbalance MIP/MDP gemiddelde (€/MWh) uit op prijstijdsas.
+    Past gewicht toe: effectieve adj = (imbalance_mid - day_ahead) × weight.
+    Geeft 0.0 terug als geen data.
+    """
+    if imbalance_series is None or imbalance_series.empty:
+        return [0.0] * len(prices_df)
+    try:
+        idx = pd.DatetimeIndex(imbalance_series.index)
+        if idx.tz is None:
+            idx = idx.tz_localize("UTC")
+        imb_indexed = pd.Series(imbalance_series.values, index=idx)
+        price_idx   = pd.DatetimeIndex(prices_df["datetime"])
+        if price_idx.tz is None:
+            price_idx = price_idx.tz_localize("UTC")
+        aligned = imb_indexed.reindex(price_idx, method="nearest", tolerance="20min").fillna(0.0)
+        # Bereken effectieve aanpassing t.o.v. day-ahead
+        da_prices = pd.Series(prices_df["price_eur_mwh"].values, index=price_idx)
+        adj = (aligned - da_prices) * weight
+        # Clip extreme uitschieters (imbalance kan >1000 €/MWh zijn)
+        adj = adj.clip(-50, 50)
+        return adj.tolist()
     except Exception:
         return [0.0] * len(prices_df)
 

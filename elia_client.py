@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Elia Open Data Client voor EMS Belgium
+Elia Open Data Client voor EMS Belgium v2.0
 =======================================
 Wrapper rond elia-py (pip install elia-py).
 
@@ -449,6 +449,99 @@ class EliaClient:
             ),
         }
 
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # IMBALANCE PRIJZEN — als intraday proxy-signaal voor MILP
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_imbalance_prices_realtime(self) -> pd.DataFrame:
+        """
+        Real-time imbalance prijs (ods161) — per minuut bijgewerkt.
+        Bevat: MIP (marginale incrementele prijs), MDP (marginale decrementele prijs),
+               NRV (Net Regulation Volume) en de SI (System Imbalance).
+
+        Gebruik in EMS:
+          - MIP hoog + SI negatief → nettekort → goede tijd om te ontladen
+          - MDP laag / negatief + SI positief → netoverschot → goede tijd om te laden
+          - Enkel beschikbaar voor huidige uur; gebruik ods162 voor historiek
+        """
+        try:
+            df = self._c.get_imbalance_prices_per_quarter_hour()
+            return self._standardize_imbalance(df, realtime=True)
+        except Exception as e:
+            print(f"[Elia] ods161 realtime fout: {e}")
+            return _empty_imbalance_df()
+
+    def get_imbalance_prices_historical(
+        self,
+        start: dt.date | dt.datetime,
+        end:   dt.date | dt.datetime,
+    ) -> pd.DataFrame:
+        """
+        Historische imbalance prijzen (ods162) per kwartier.
+        MIP en MDP per ISP (imbalance settlement period = 15 min).
+
+        Essentieel voor MILP-backtesting:
+          - Correleer MIP/MDP met day-ahead prijs
+          - Identificeer patronen: avondpieken winter, zomermiddagen
+          - Basis voor toekomstige aFRR-bieding simulatie via Yuso
+        """
+        try:
+            df = self._c.get_historical_imbalance_prices_per_quarter_hour(
+                start=_to_dt(start), end=_to_dt(end))
+            return self._standardize_imbalance(df, realtime=False)
+        except Exception as e:
+            print(f"[Elia] ods162 historisch fout: {e}")
+            return _empty_imbalance_df()
+
+    def get_imbalance_as_price_signal(
+        self,
+        start: dt.date | dt.datetime | None = None,
+        end:   dt.date | dt.datetime | None = None,
+    ) -> pd.DataFrame:
+        """
+        Combineer imbalance MIP/MDP met day-ahead prijs tot een
+        gewogen prijssignaal voor MILP.
+
+        Logic:
+          - Als MIP >> day-ahead → markt in tekort → effectieve prijs hoger dan gepland
+          - Als MDP << day-ahead → markt in overschot → effectieve prijs lager
+          - Gewogen signaal = day_ahead_price × 0.85 + 0.15 × imbalance_mid_price
+            (15% gewicht voor imbalance corr., conservatief want historisch volatiel)
+
+        Returns DataFrame met kolommen:
+          datetime, imbalance_mid_eur_mwh, price_signal_adj, trend
+        """
+        if start is None:
+            start = dt.date.today() - dt.timedelta(days=7)
+        if end is None:
+            end = dt.date.today()
+
+        imb_df = self.get_imbalance_prices_historical(start, end)
+        if imb_df.empty:
+            return pd.DataFrame()
+
+        mip_col = next((c for c in ["mip","marginalincrementalprice","MIP"]
+                        if c in imb_df.columns), None)
+        mdp_col = next((c for c in ["mdp","marginaldecrementalprice","MDP"]
+                        if c in imb_df.columns), None)
+
+        if not mip_col or not mdp_col:
+            return imb_df
+
+        imb_df["imbalance_mid_eur_mwh"] = (
+            imb_df[mip_col].fillna(0) + imb_df[mdp_col].fillna(0)
+        ) / 2
+
+        # Trend: positief = nettekort (hoge MIP, goed om te ontladen)
+        imb_df["trend"] = imb_df.apply(
+            lambda r: "⬆️ Tekort" if float(r.get(mip_col, 0) or 0) > 100 else
+                      ("⬇️ Overschot" if float(r.get(mdp_col, 0) or 0) < -20 else
+                       "↔️ Neutraal"), axis=1)
+
+        return imb_df[["datetime", "imbalance_mid_eur_mwh", "trend"]
+                      + [c for c in [mip_col, mdp_col] if c]].copy()
+
     # ─────────────────────────────────────────────────────────────────────────
     # Interne helpers
     # ─────────────────────────────────────────────────────────────────────────
@@ -544,6 +637,11 @@ def _empty_solar_df() -> pd.DataFrame:
 def _empty_wind_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["datetime","measured","dayaheadforecast",
                                    "weekaheadforecast","mostrecentforecast","region"])
+
+def _empty_imbalance_df() -> pd.DataFrame:
+    return pd.DataFrame(columns=["datetime","mip","mdp","nrv","si",
+                                   "imbalance_mid_eur_mwh","trend"])
+
 
 
 if __name__ == "__main__":

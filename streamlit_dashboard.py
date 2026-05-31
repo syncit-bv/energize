@@ -1049,7 +1049,56 @@ if st.session_state.get("scenarios_pending"):
         if own_kwp == 0:
             errors["milp_wind_solar"] = "Eigen PV-vermogen = 0 kWp — stel in via sidebar"
 
-    prog.progress(100, text="✅ Alle 5 scenario's berekend!")
+    # ── Scenario 6: MILP + DA + Solar + Wind + Imbalance ──────────────────
+    try:
+        prog.progress(95, text="▶ Scenario 6/6: MILP + Imbalance signaal ⚖️…")
+        solar_kwh_imb = solar_kwh if 'solar_kwh' in dir() else pd.Series(dtype=float)
+        wind_adj_imb  = wind_price_adj if 'wind_price_adj' in dir() else pd.Series(dtype=float)
+
+        imbalance_adj = pd.Series(dtype=float)
+        if ELIA_AVAILABLE:
+            try:
+                ec_imb     = EliaClient()
+                imb_signal = ec_imb.get_imbalance_as_price_signal(sel_start, sel_end)
+                if not imb_signal.empty and "imbalance_mid_eur_mwh" in imb_signal.columns:
+                    imbalance_adj = pd.Series(
+                        imb_signal["imbalance_mid_eur_mwh"].values,
+                        index=pd.DatetimeIndex(imb_signal["datetime"]),
+                        name="imbalance_adj",
+                    )
+            except Exception as imb_e:
+                errors["imbalance_fetch"] = str(imb_e)
+
+        imb_loaded = not imbalance_adj.empty and imbalance_adj.abs().sum() > 0
+        imb_label  = (
+            f"MILP+DA+Solar+Wind+Imbalance ({own_kwp}kWp, imb actief)"
+            if imb_loaded else
+            f"MILP+DA+Solar+Wind (geen imbalancedata)"
+        )
+
+        # Combineer wind + imbalance aanpassingen
+        if imb_loaded and not wind_adj_imb.empty:
+            combined_adj = wind_adj_imb.add(imbalance_adj, fill_value=0)
+        elif imb_loaded:
+            combined_adj = imbalance_adj
+        else:
+            combined_adj = wind_adj_imb
+
+        sch6, s6 = optimize_battery_schedule_imbalance(
+            milp_da_input,
+            imbalance_adj_per_slot=combined_adj,
+            imbalance_weight=0.15,
+            solar_kwh_per_slot=solar_kwh_imb if not solar_kwh_imb.empty else None,
+            label=imb_label,
+            execute_until=sel_end,
+            **milp_args,
+        )
+        s6["imbalance_data_loaded"] = imb_loaded
+        scenarios["milp_imbalance"] = (sch6, s6)
+    except Exception as e:
+        errors["milp_imbalance"] = str(e)
+
+    prog.progress(100, text="✅ Alle 6 scenario's berekend!")
 
     st.session_state.scenarios         = scenarios
     st.session_state.scenarios_pending = False
@@ -1736,10 +1785,11 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
         st.warning("elia_client.py niet gevonden.")
     else:
         # ── Tabs: Imbalance | Solar ──
-        tab_imb, tab_solar, tab_wind = st.tabs([
+        tab_imb, tab_solar, tab_wind, tab_imb_hist = st.tabs([
             "⚡ Imbalance Prijzen",
             "☀️ Solar PV Forecast",
             "🌬️ Wind + Hernieuwbaar Surplus",
+            "⚖️ Imbalance Historiek + Live",
         ])
 
         # ── TAB 1: Imbalance ──────────────────────────────────────────────────
@@ -2094,6 +2144,147 @@ with st.expander("⚡ Elia Grid Intelligence — Imbalance + Solar PV Forecast",
                                 st.warning("Geen historische winddata.")
                         except Exception as e:
                             st.error(f"Wind historisch fout: {e}")
+
+        # ── TAB 4: Imbalance Historiek + Live ────────────────────────────────
+        with tab_imb_hist:
+            st.markdown(
+                "**Imbalance prijzen als intraday proxy-signaal** (Elia ods162).\n\n"
+                "De imbalance prijs (MIP/MDP) weerspiegelt de werkelijke markttoestand "
+                "*binnen* de dag. Hoge MIP = nettekort → extra waarde ontladen. "
+                "Lage MDP = netoverschot → extra waarde laden.\n\n"
+                "Scenario 6 in de vergelijkingstabel gebruikt dit signaal met 15% gewicht "
+                "naast de day-ahead prijs."
+            )
+
+            col_imb1, col_imb2 = st.columns(2)
+
+            with col_imb1:
+                st.markdown("**📊 Historische imbalance (ods162)**")
+                imb_days = st.slider("Periode (dagen)", 1, 30, 7, key="imb_hist_days")
+                if st.button("📥 Imbalance historiek ophalen", key="btn_imb_hist"):
+                    with st.spinner("Elia ods162 ophalen…"):
+                        try:
+                            ec      = EliaClient()
+                            imb_end = date.today()
+                            imb_sta = imb_end - timedelta(days=imb_days)
+                            imb_df  = ec.get_imbalance_prices_historical(imb_sta, imb_end)
+
+                            if not imb_df.empty:
+                                st.success(f"✅ {len(imb_df)} kwartieren | {imb_days} dagen")
+
+                                # MIP/MDP grafiek
+                                mip_col = next((c for c in ["mip","marginalincrementalprice","MIP"]
+                                                if c in imb_df.columns), None)
+                                mdp_col = next((c for c in ["mdp","marginaldecrementalprice","MDP"]
+                                                if c in imb_df.columns), None)
+
+                                if mip_col and mdp_col and "datetime" in imb_df.columns:
+                                    fig_imb = go.Figure()
+                                    fig_imb.add_trace(go.Scatter(
+                                        x=imb_df["datetime"], y=imb_df[mip_col],
+                                        name="MIP (€/MWh) — nettekort",
+                                        line=dict(color="#EF4444", width=1.5)))
+                                    fig_imb.add_trace(go.Scatter(
+                                        x=imb_df["datetime"], y=imb_df[mdp_col],
+                                        name="MDP (€/MWh) — netoverschot",
+                                        line=dict(color="#3B82F6", width=1.5)))
+                                    fig_imb.add_hline(y=0, line_dash="dot",
+                                                      line_color="gray", opacity=0.5)
+                                    fig_imb.update_layout(
+                                        title="MIP / MDP Imbalance Prijzen (€/MWh)",
+                                        xaxis_title="Tijd", yaxis_title="€/MWh",
+                                        legend=dict(x=0, y=1.1, orientation="h"))
+                                    st.plotly_chart(fig_imb, use_container_width=True)
+
+                                    # Statistieken
+                                    s1, s2, s3, s4 = st.columns(4)
+                                    s1.metric("Gem. MIP", f"{imb_df[mip_col].mean():.0f} €/MWh")
+                                    s2.metric("Gem. MDP", f"{imb_df[mdp_col].mean():.0f} €/MWh")
+                                    s3.metric("MIP > 200€",
+                                              f"{(imb_df[mip_col] > 200).sum()} slots",
+                                              help="Slots met extreem nettekort — ideaal ontladen")
+                                    s4.metric("MDP < 0€",
+                                              f"{(imb_df[mdp_col] < 0).sum()} slots",
+                                              help="Slots met netoverschot — ideaal laden")
+
+                                    st.caption(
+                                        "ℹ️ **MIP** (Marginale Incrementele Prijs) = wat Elia "
+                                        "betaalt voor bijkomende productie bij nettekort. "
+                                        "**MDP** = wat Elia vraagt voor productieverlaging bij overschot. "
+                                        "Scenario 6 gebruikt het gemiddelde van beide met 15% gewicht."
+                                    )
+                            else:
+                                st.warning("Geen imbalance data beschikbaar.")
+                        except Exception as e:
+                            st.error(f"Imbalance historiek fout: {e}")
+
+            with col_imb2:
+                st.markdown("**⚡ Live imbalance signaal (ods161)**")
+                st.caption("Wordt per minuut bijgewerkt door Elia.")
+                if st.button("🔴 Live imbalance ophalen", key="btn_imb_live"):
+                    with st.spinner("Real-time imbalance ophalen…"):
+                        try:
+                            ec      = EliaClient()
+                            live_df = ec.get_imbalance_prices_realtime()
+                            if not live_df.empty:
+                                st.success(f"✅ {len(live_df)} minuten data")
+                                st.dataframe(live_df.tail(15),
+                                             use_container_width=True, hide_index=True)
+                                latest = live_df.iloc[-1]
+                                mip_now = latest.get("mip", latest.get("marginalincrementalprice", None))
+                                mdp_now = latest.get("mdp", latest.get("marginaldecrementalprice", None))
+                                if mip_now is not None and mdp_now is not None:
+                                    mid_now = (float(mip_now or 0) + float(mdp_now or 0)) / 2
+                                    if mid_now > 100:
+                                        st.error(f"🔴 MIP={mip_now:.0f} €/MWh — nettekort! "
+                                                 "Overweeg nu te ontladen.")
+                                    elif mid_now < -20:
+                                        st.success(f"🟢 MDP={mdp_now:.0f} €/MWh — netoverschot! "
+                                                   "Overweeg nu te laden.")
+                                    else:
+                                        st.info(f"🟡 Imbalance neutraal (mid={mid_now:.0f} €/MWh)")
+                            else:
+                                st.warning("Geen live data beschikbaar.")
+                        except Exception as e:
+                            st.error(f"Live imbalance fout: {e}")
+
+                st.markdown("---")
+                st.markdown("**🌐 SmartPrice.be — Live EPEX Spot**")
+                st.caption(
+                    "Gratis Belgische EPEX Spot prijs, elke 15 min bijgewerkt. "
+                    "Geen API-key nodig. Bron: [smartprice.be](https://www.smartprice.be)"
+                )
+                if st.button("📡 Haal live EPEX prijs op", key="btn_smartprice"):
+                    with st.spinner("SmartPrice.be ophalen…"):
+                        try:
+                            import requests as _req
+                            endpoints = [
+                                "https://www.smartprice.be/api/prices/today",
+                                "https://www.smartprice.be/api/v1/prices/BE",
+                                "https://www.smartprice.be/api/prices",
+                            ]
+                            data = None
+                            for url in endpoints:
+                                try:
+                                    r = _req.get(url, timeout=5,
+                                                 headers={"User-Agent": "EMS-Belgium/1.0"})
+                                    if r.status_code == 200:
+                                        data = r.json()
+                                        break
+                                except Exception:
+                                    continue
+
+                            if data:
+                                st.success("✅ SmartPrice.be data ontvangen")
+                                st.json(data if isinstance(data, dict) else data[:5])
+                            else:
+                                st.warning(
+                                    "SmartPrice.be API niet bereikbaar. "
+                                    "Alternatief: [energyprices.eu](https://www.energyprices.eu/electricity/belgium) "
+                                    "of gebruik de ENTSO-E knoppen voor day-ahead prijzen."
+                                )
+                        except Exception as e:
+                            st.error(f"SmartPrice.be fout: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
