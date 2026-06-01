@@ -1,104 +1,159 @@
-"""Elia Open Data endpoints — /api/elia/..."""
+"""Elia Open Data endpoints — /api/elia/imbalance  en  /api/elia/solar-wind"""
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query
-
-from app.models.schemas import (
-    EliaImbalanceRecord,
-    EliaImbalanceResponse,
-    EliaSolarRecord,
-    EliaWindRecord,
-)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["elia"])
 
 
 def _get_client():
+    """Lazy import van EliaClient (vereist elia-py)."""
     try:
         from elia_client import EliaClient
         return EliaClient()
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"elia-py niet geinstalleerd: {exc}. Voer 'pip install elia-py' uit.",
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Elia client niet beschikbaar: {exc}")
 
 
-@router.get("/elia/imbalance/latest")
-async def get_imbalance_latest():
-    """Meest recente imbalance snapshot van Elia."""
-    client = _get_client()
-    try:
-        data = client.get_current_system_imbalance()
-    except Exception as exc:
-        logger.exception("Elia imbalance latest fetch mislukt")
-        raise HTTPException(status_code=502, detail=str(exc))
-    return data
+# ---------------------------------------------------------------------------
+# GET /api/elia/imbalance
+# ---------------------------------------------------------------------------
 
-
-@router.get("/elia/imbalance", response_model=EliaImbalanceResponse)
+@router.get("/elia/imbalance")
 async def get_imbalance(
-    date_: date = Query(..., alias="date", description="Datum (YYYY-MM-DD)"),
+    date_: date = Query(None, alias="date", description="Datum (YYYY-MM-DD). Zonder parameter: vandaag."),
 ):
-    """Elia imbalance profiel voor een specifieke dag."""
+    """
+    Elia onbalansdata (NRV, MIP, MDP) per kwartier.
+
+    Zonder `date` parameter: real-time snapshot van vandaag.
+    Met `date`: historisch profiel via ods134/ods047 met slimme fallback.
+
+    Velden per kwartier:
+    - `datetime`: tijdstip (UTC)
+    - `nrv_mw`: netto reguleringsvolume in MW (positief = tekort, negatief = overschot)
+    - `mip_eur_mwh`: marginale incrementele prijs (€/MWh)
+    - `mdp_eur_mwh`: marginale decrementele prijs (€/MWh)
+    - `si_mw`: systeemonbalans in MW
+    """
     client = _get_client()
+    target = date_ if date_ is not None else date.today()
+
     try:
-        df = client.get_imbalance_prices_per_quarter_hour(str(date_), str(date_))
+        df, source = client.get_imbalance_best_available(target)
     except Exception as exc:
-        logger.exception("Elia imbalance fetch mislukt")
+        logger.exception("Elia imbalance fetch mislukt voor %s", target)
         raise HTTPException(status_code=502, detail=str(exc))
 
     if df is None or df.empty:
-        raise HTTPException(status_code=404, detail="Geen imbalancedata voor deze datum.")
-
-    records = [
-        EliaImbalanceRecord(
-            timestamp=str(ts),
-            nrv=row.get("nrv"),
-            alpha=row.get("alpha"),
+        raise HTTPException(
+            status_code=404,
+            detail=f"Geen imbalancedata beschikbaar voor {target}. Bron: {source}",
         )
-        for ts, row in df.iterrows()
-    ]
-    return EliaImbalanceResponse(date=str(date_), records=records)
+
+    # Converteer DataFrame naar lijst van dicts (serialiseerbaar)
+    records = []
+    for _, row in df.iterrows():
+        record = {"datetime": str(row.get("datetime", ""))}
+        for col in ["nrv_mw", "si_mw", "mip_eur_mwh", "mdp_eur_mwh", "alpha"]:
+            val = row.get(col)
+            if val is not None:
+                try:
+                    record[col] = round(float(val), 3)
+                except (TypeError, ValueError):
+                    record[col] = None
+        records.append(record)
+
+    return {
+        "date":    str(target),
+        "source":  source,
+        "count":   len(records),
+        "records": records,
+    }
 
 
-@router.get("/elia/solar/forecast")
-async def get_solar_forecast():
-    """Elia zonne-energie forecast voor vandaag en morgen."""
+# ---------------------------------------------------------------------------
+# GET /api/elia/solar-wind
+# ---------------------------------------------------------------------------
+
+@router.get("/elia/solar-wind")
+async def get_solar_wind():
+    """
+    Elia zon- en windproductieforecast voor vandaag en morgen.
+
+    Combineert:
+    - Solar PV forecast (ods087): intraday + day-ahead + week-ahead
+    - Wind forecast (ods086): intraday + day-ahead + week-ahead
+
+    Bevat ook de gecombineerde hernieuwbaar-surplus index met verwacht
+    prijseffect in EUR/MWh per kwartier (bruikbaar als MILP-signaalbron).
+
+    EMS-advies:
+    - `solar_advice`: laadaanbeveling op basis van solar piek
+    - `wind_solar_advice`: gecombineerd zon+wind advies
+    - `surplus_forecast`: kwartierlijkse surplus + prijsaanpassing
+    """
     client = _get_client()
+
+    # Solar forecast
     try:
-        data = client.get_solar_power_estimation_and_forecast()
+        solar_df = client.get_solar_forecast()
     except Exception as exc:
-        logger.exception("Elia solar forecast mislukt")
-        raise HTTPException(status_code=502, detail=str(exc))
-    return data
+        logger.warning("Solar forecast mislukt: %s", exc)
+        solar_df = None
 
-
-@router.get("/elia/solar/history")
-async def get_solar_history(
-    start: date = Query(..., description="Startdatum (YYYY-MM-DD)"),
-    end: date = Query(..., description="Einddatum (YYYY-MM-DD)"),
-):
-    """Historische Elia zonne-energieproductie."""
-    client = _get_client()
+    # Wind forecast
     try:
-        df = client.get_solar_power_estimation_and_forecast(str(start), str(end))
+        wind_df = client.get_wind_forecast()
     except Exception as exc:
-        logger.exception("Elia solar history mislukt")
-        raise HTTPException(status_code=502, detail=str(exc))
-    if df is None or (hasattr(df, "empty") and df.empty):
-        raise HTTPException(status_code=404, detail="Geen zonnenergie data voor dit bereik.")
-    return df if isinstance(df, dict) else df.to_dict(orient="records")
+        logger.warning("Wind forecast mislukt: %s", exc)
+        wind_df = None
 
-
-@router.get("/elia/wind/surplus")
-async def get_wind_surplus():
-    """Elia wind surplus data."""
-    client = _get_client()
+    # EMS-adviezen
     try:
-        data = client.get_wind_power_estimation_and_forecast()
+        solar_advice = client.get_solar_ems_advice()
     except Exception as exc:
-        logger.exception("Elia wind surplus mislukt")
-        raise HTTPException(status_code=502, detail=str(exc))
-    return data
+        solar_advice = {"status": f"Fout: {exc}"}
+
+    try:
+        wind_solar_advice = client.get_wind_solar_ems_advice()
+    except Exception as exc:
+        wind_solar_advice = {"status": f"Fout: {exc}"}
+
+    # Surplus forecast per kwartier
+    try:
+        surplus_df = client.get_renewable_surplus_forecast()
+        surplus_records = surplus_df.to_dict(orient="records") if surplus_df is not None and not surplus_df.empty else []
+        # datetime objecten naar string
+        for r in surplus_records:
+            if "datetime" in r:
+                r["datetime"] = str(r["datetime"])
+    except Exception as exc:
+        logger.warning("Surplus forecast mislukt: %s", exc)
+        surplus_records = []
+
+    def _df_to_list(df):
+        if df is None or df.empty:
+            return []
+        recs = df.to_dict(orient="records")
+        for r in recs:
+            if "datetime" in r:
+                r["datetime"] = str(r["datetime"])
+        return recs
+
+    return {
+        "solar_forecast":    _df_to_list(solar_df),
+        "wind_forecast":     _df_to_list(wind_df),
+        "surplus_forecast":  surplus_records,
+        "solar_advice":      solar_advice,
+        "wind_solar_advice": wind_solar_advice,
+    }

@@ -1,9 +1,9 @@
-"""Prijsdata endpoints — /api/prices"""
+"""Prijsdata endpoints — /api/prices/day-ahead  en  /api/prices/history"""
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
-from typing import Optional
+import os
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -13,62 +13,109 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["prices"])
 
 
-def _load_entsoe_client():
-    """Lazy import om te vermijden dat ontbrekende env-vars de app crashen bij start."""
+def _get_entsoe_client():
+    """Lazy import + API-key uit omgevingsvariabele."""
+    api_key = os.getenv("ENTSOE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="ENTSOE_API_KEY niet geconfigureerd in de omgeving.",
+        )
     try:
         from entsoe_client import EntsoeClient
-        return EntsoeClient()
+        return EntsoeClient(api_key=api_key)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"ENTSO-E client niet beschikbaar: {exc}")
 
 
-@router.get("/prices", response_model=PricesResponse)
-async def get_prices(
-    days: Optional[int] = Query(None, ge=1, le=365, description="Aantal dagen terug vanaf vandaag"),
-    start: Optional[date] = Query(None, description="Startdatum (YYYY-MM-DD)"),
-    end: Optional[date] = Query(None, description="Einddatum (YYYY-MM-DD)"),
-    source: PriceSource = Query(PriceSource.entsoe),
-):
-    """
-    Haal day-ahead elektriciteitsprijzen op.
-
-    Gebruik `days=30` voor een rolling window, of geef `start`+`end` voor een vaste periode.
-    """
-    # Bepaal datumbereik
-    if days is not None:
-        end_dt = datetime.utcnow().date()
-        start_dt = end_dt - timedelta(days=days)
-    elif start and end:
-        start_dt, end_dt = start, end
-    else:
-        raise HTTPException(
-            status_code=422,
-            detail="Geef `days` op, of beide `start` en `end`.",
+def _df_to_records(df) -> list:
+    """Converteer ENTSO-E DataFrame naar PriceRecord-lijst."""
+    records = []
+    for _, row in df.iterrows():
+        records.append(
+            PriceRecord(
+                timestamp=str(row["datetime"]),
+                price_eur_mwh=float(row["price_eur_mwh"]),
+            )
         )
+    return records
 
-    if start_dt >= end_dt:
-        raise HTTPException(status_code=422, detail="`start` moet voor `end` liggen.")
 
-    client = _load_entsoe_client()
+# ---------------------------------------------------------------------------
+# GET /api/prices/day-ahead
+# ---------------------------------------------------------------------------
 
+@router.get("/prices/day-ahead", response_model=PricesResponse)
+async def get_day_ahead_prices():
+    """
+    Dag-vooruit elektriciteitsprijzen (ENTSO-E A44) voor vandaag en morgen.
+
+    Retourneert kwartierlijkse prijzen in EUR/MWh voor Belgie.
+    Na 13:00 CET zijn ook de prijzen voor morgen beschikbaar.
+    """
+    today    = date.today()
+    end_excl = today + timedelta(days=2)   # ENTSO-E end is exclusief
+
+    client = _get_entsoe_client()
     try:
-        df = client.fetch_prices(str(start_dt), str(end_dt))
+        df = client.get_day_ahead_prices(start=today, end=end_excl)
     except Exception as exc:
-        logger.exception("ENTSO-E fetch mislukt")
+        logger.exception("ENTSO-E day-ahead fetch mislukt")
         raise HTTPException(status_code=502, detail=f"ENTSO-E fetch mislukt: {exc}")
 
     if df is None or df.empty:
-        raise HTTPException(status_code=404, detail="Geen prijsdata beschikbaar voor dit bereik.")
+        raise HTTPException(
+            status_code=404,
+            detail="Geen dag-vooruit prijzen beschikbaar. Zijn ze al gepubliceerd (na 13:00 CET)?",
+        )
 
-    records = [
-        PriceRecord(timestamp=str(ts), price_eur_mwh=float(price))
-        for ts, price in zip(df.index, df.iloc[:, 0])
-    ]
-
+    records = _df_to_records(df)
     return PricesResponse(
-        source=source,
-        start=str(start_dt),
-        end=str(end_dt),
+        source=PriceSource.entsoe,
+        start=str(today),
+        end=str(end_excl - timedelta(days=1)),
+        records=records,
+        count=len(records),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/prices/history
+# ---------------------------------------------------------------------------
+
+@router.get("/prices/history", response_model=PricesResponse)
+async def get_price_history(
+    start: date = Query(..., description="Startdatum (YYYY-MM-DD)"),
+    end: date = Query(..., description="Einddatum exclusief (YYYY-MM-DD)"),
+):
+    """
+    Historische dag-vooruit elektriciteitsprijzen (ENTSO-E A44).
+
+    Maximaal bereik: 365 dagen.
+    """
+    if start >= end:
+        raise HTTPException(status_code=422, detail="`start` moet voor `end` liggen.")
+    if (end - start).days > 365:
+        raise HTTPException(status_code=422, detail="Maximaal bereik is 365 dagen.")
+
+    client = _get_entsoe_client()
+    try:
+        df = client.get_day_ahead_prices(start=start, end=end)
+    except Exception as exc:
+        logger.exception("ENTSO-E historische fetch mislukt")
+        raise HTTPException(status_code=502, detail=f"ENTSO-E fetch mislukt: {exc}")
+
+    if df is None or df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail="Geen historische prijsdata beschikbaar voor dit bereik.",
+        )
+
+    records = _df_to_records(df)
+    return PricesResponse(
+        source=PriceSource.entsoe,
+        start=str(start),
+        end=str(end),
         records=records,
         count=len(records),
     )
