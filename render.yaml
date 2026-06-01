@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ems-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    envVars:
+      - key: ENTSOE_API_KEY
+        sync: false
+      - key: EM_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: CORS_ORIGINS
+        value: https://ems-api.onrender.com
+      - key: LOG_LEVEL
+        value: INFO
+    healthCheckPath: /health
