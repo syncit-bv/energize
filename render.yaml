@@ -1,21 +1,4 @@
 services:
-  # ─── Streamlit Dashboard (frontend) ───────────────────────────────
-  - type: web
-    name: energize-ems
-    runtime: python
-    region: frankfurt
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: bash start.sh
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: ENTSOE_KEY
-        sync: false
-      - key: EM_KEY
-        sync: false
-
-  # ─── FastAPI Backend (REST API) ───────────────────────────────────
   - type: web
     name: ems-api
     runtime: python
@@ -28,10 +11,12 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: ENTSOE_API_KEY
-        sync: false
+        sync: false   # Stel handmatig in via Render dashboard → Environment
       - key: EM_API_KEY
-        sync: false
+        sync: false   # Optioneel
       - key: ENVIRONMENT
         value: production
       - key: LOG_LEVEL
         value: INFO
+      - key: CORS_ORIGINS
+        value: https://ems-api.onrender.com  # Wordt aangevuld met echte URL na eerste deploy
