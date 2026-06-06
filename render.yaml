@@ -1,4 +1,5 @@
 services:
+  # ─── Streamlit Dashboard (frontend) ───────────────────────────────
   - type: web
     name: energize-ems
     runtime: python
@@ -13,3 +14,24 @@ services:
         sync: false
       - key: EM_KEY
         sync: false
+
+  # ─── FastAPI Backend (REST API) ───────────────────────────────────
+  - type: web
+    name: ems-api
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENTSOE_API_KEY
+        sync: false
+      - key: EM_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
