@@ -1,0 +1,7 @@
+# Zorg dat shell scripts altijd LF line endings hebben (nodig op Linux/Render)
+*.sh text eol=lf
+
+# Python en YAML: normaal behandelen
+*.py text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf

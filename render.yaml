@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: energize-ems
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ENTSOE_KEY
+        sync: false
+      - key: EM_KEY
+        sync: false
