@@ -1,58 +1,192 @@
-# EMS Belgium MVP - Smart Battery & Grid Platform
+# Energize EMS — Smart Battery & Grid Platform
 
-**Doel**: Eigen EMS software platform bouwen voor slim batterijbeheer op het Belgische elektriciteitsnet. 
-Focus op arbitrage, "free/paid electricity" charging bij negatieve prijzen, grid balancing (equilibratie) en verdienen aan disbalans via aggregator (Yuso).
+**SyncIT BV** | Belgisch Energy Management System voor slim batterijbeheer, arbitrage en grid services.
 
-## MVP v0.2 (huidige status)
-- **Data layer**: Parser voor ENTSO-E day-ahead prijzen (XML) + **Live API client** (entsoe_client.py) voor automatische fetching via ENTSO-E Transparency Platform
-- **Backtester**: Rule-based + volledige MILP optimalisatie (PuLP)
-- **Dashboard**: Interactieve Streamlit app met prijsgrafieken, SOC, acties, cumulatieve revenue + **live ENTSO-E fetch knop**
-- **Key insight uit data**: 32+ dagen met negatieve prijzen, extreme uitschieters tot -499 €/MWh. 
-  Dit creëert unieke kansen: je wordt betaald om te laden (absorbeer overtollige zonne-energie) + later verkopen bij hoge prijzen + grid services via aggregator.
+---
 
-## Resultaten backtest (25 apr - 3 mei 2026, 10 kWh batterij, 5 kW power)
-- Net revenue: ~7.89 €
-- Op 1 mei alone: +1.40 € (tijdens extreme negatieve prijzen rond 11u-12u30)
-- 8 dagen met negatieve prijzen in window → "free electricity" + grid support
+## Architectuur
 
-## Hoe starten (met live ENTSO-E data)
-1. `cd ems_mvp`
-2. Optioneel: `python price_parser.py` (voor historische XML data)
-3. `streamlit run streamlit_dashboard.py`
-4. In de sidebar → "ENTSO-E Live Data" uitklappen
-5. Vul je **gratis ENTSO-E API key** in (registreren op transparency.entsoe.eu)
-6. Kies datumbereik en klik "Fetch & Load from ENTSOE"
-7. De dashboard update meteen met verse prijzen → klaar voor MILP optimalisatie!
+```
+┌─────────────────────────┐        ┌──────────────────────────┐
+│   React Frontend        │  HTTPS │   FastAPI Backend        │
+│   (Vite + React)        │◄──────►│   ems-api.onrender.com   │
+│   energize-ems.onrender │        │   /api/*  + /docs        │
+└─────────────────────────┘        └──────────┬───────────────┘
+                                              │
+                          ┌───────────────────┼───────────────────┐
+                          ▼                   ▼                   ▼
+                   ENTSO-E API          Elia Open Data     MILP Optimizer
+                   (dag-ahead)          (imbalans/wind)    (PuLP + HiGHS)
+```
 
-**Tip voor productie**:
-- Maak een kleine cronjob/script die dagelijks na 15:00 `client.fetch_and_save_latest()` draait.
-- Zet je API keys in `.streamlit/secrets.toml` (zie voorbeeld in de map `.streamlit/`).
+> **Legacy**: de originele Streamlit dashboard (`streamlit_dashboard.py`) blijft beschikbaar
+> als referentie en fallback, maar wordt niet actief verder ontwikkeld.
 
-## Volgende stappen (roadmap)
-- [x] Live ENTSO-E + Electricity Maps integratie (prijzen + carbon intensity + forecasts)
-- [ ] Volledige MILP optimalisatie (PuLP) i.p.v. rules (multi-objective: cost + battery health + grid support)
-- [ ] Integratie PV forecast (weer API) + eigen verbruiksprofiel
-- [ ] Yuso aggregator koppeling → real-time imbalance prijzen + biedingen op onbalansmarkt (aFRR etc.)
-- [ ] Behind-the-meter optimalisatie (self-consumption + V2G Tesla)
-- [ ] Multi-asset support (thuisbatterij + EV + eventueel extra sites)
-- [ ] GitHub repo + CI voor tests
-- [ ] Vennootschap fiscale optimalisatie + ROI calculator
-- [ ] Daily automation (cron + auto MILP run na 15:00 day-ahead publicatie)
+---
 
-## Tech stack (voorgesteld)
-- Python + Pandas + PuLP (optimization)
-- Streamlit / Plotly Dash (dashboard)
-- TimescaleDB of InfluxDB (time-series prijzen + metingen)
-- FastAPI (backend API voor later multi-user platform)
-- MQTT / Home Assistant (lokale real-time sturing)
-- Yuso / Elia API (imbalance + flexibility)
+## Huidige staat
 
-## Waarom eigen platform?
-- Volledige controle over Belgische markt (negatieve prijzen, Elia rules)
-- Data ownership + geen vendor lock-in
-- Uitbreidbaar naar SaaS/platform voor andere prosumers of energy communities
-- Combinatie met jouw bestaande setup (6300 Wp PV, Tesla, vennootschap)
+| Laag | Status | Technologie |
+|---|---|---|
+| FastAPI backend | ✅ Volledig gebouwd | FastAPI 0.111, Pydantic v2 |
+| MILP optimizer | ✅ Productierijp | PuLP + HiGHS, async jobs |
+| ENTSO-E integratie | ✅ Live | entsoe-py |
+| Elia integratie | ✅ Live | elia-py (imbalans + solar/wind) |
+| Deployment config | ✅ Klaar | Render.com (render.yaml) |
+| React frontend | 🔨 In ontwikkeling | React + Vite |
 
-Contact / collab: Maak een GitHub repo aan met deze bestanden + de XML, dan kunnen we via branches/PRs verder bouwen. Of zeg waar je de setup makkelijk wil doen (Codespaces, Replit, lokale devcontainer...).
+---
 
-Laten we dit tot een killer EMS platform maken dat écht geld verdient aan grid disbalance én het Belgische net helpt equilibreren. ⚡🇧🇪
+## API Endpoints
+
+De volledige interactieve documentatie staat op **`/docs`** (Swagger UI).
+
+### Prijsdata
+| Method | Endpoint | Beschrijving |
+|---|---|---|
+| GET | `/api/prices/day-ahead` | ENTSO-E dag-ahead prijzen (EUR/MWh) |
+| GET | `/api/prices/history?days=30` | Historische prijsdata |
+
+### Elia Grid Data
+| Method | Endpoint | Beschrijving |
+|---|---|---|
+| GET | `/api/elia/imbalance` | Belgische onbalans (NRV, MIP/MDP) |
+| GET | `/api/elia/solar-wind` | Zon- en windproductie forecast |
+
+### MILP Optimalisatie (async)
+| Method | Endpoint | Beschrijving |
+|---|---|---|
+| POST | `/api/optimization/run` | Start batterij-optimalisatie (achtergrond) |
+| GET | `/api/jobs/{job_id}` | Peil status: `pending / running / completed / failed` |
+
+### Meta
+| Method | Endpoint | Beschrijving |
+|---|---|---|
+| GET | `/health` | Status check (gebruikt door Render) |
+| GET | `/docs` | Swagger UI |
+| GET | `/redoc` | ReDoc documentatie |
+
+---
+
+## Lokaal draaien
+
+### Vereisten
+- Python 3.11+
+- Git
+
+### Backend opstarten
+```bash
+git clone https://github.com/syncit-bv/energize.git
+cd energize
+pip install -r requirements.txt
+
+# API keys instellen
+export ENTSOE_API_KEY="jouw-entsoe-key"   # transparency.entsoe.eu
+
+# Server starten
+uvicorn app.main:app --reload --port 8000
+```
+
+Backend draait op: http://localhost:8000
+Swagger docs op: http://localhost:8000/docs
+
+### Legacy Streamlit dashboard (optioneel)
+```bash
+# Maak .streamlit/secrets.toml aan:
+# entsoe_key = "jouw-key"
+
+streamlit run streamlit_dashboard.py
+```
+
+---
+
+## Deployment op Render.com
+
+Het project bevat een `render.yaml` met twee services:
+
+| Service | Naam | URL |
+|---|---|---|
+| FastAPI backend | `ems-api` | `https://ems-api.onrender.com` |
+| Streamlit frontend (legacy) | `energize-ems` | `https://energize-ems.onrender.com` |
+
+### Environment variables instellen op Render
+Ga naar je service → **Environment** tab:
+
+| Key | Service | Verplicht |
+|---|---|---|
+| `ENTSOE_API_KEY` | ems-api | Ja |
+| `CORS_ORIGINS` | ems-api | Ja (bv. `https://energize-ems.onrender.com`) |
+| `ENTSOE_KEY` | energize-ems | Ja |
+
+> ⚠️ Zet nooit API keys in `.streamlit/secrets.toml` of commit ze naar GitHub.
+> Gebruik altijd environment variables op Render.
+
+---
+
+## Projectstructuur
+
+```
+energize/
+├── app/                          # FastAPI applicatie
+│   ├── main.py                   # Entry point, CORS, router registratie
+│   ├── models/
+│   │   └── schemas.py            # Pydantic request/response modellen
+│   ├── routers/
+│   │   ├── prices.py             # /api/prices/* (ENTSO-E)
+│   │   ├── elia.py               # /api/elia/* (Elia Open Data)
+│   │   ├── optimization.py       # /api/optimization/run (MILP)
+│   │   └── jobs.py               # /api/jobs/{id} (job polling)
+│   └── services/
+│       └── job_manager.py        # Async achtergrondtaken
+├── static/                       # React frontend build output (hier deployen)
+├── milp_optimizer.py             # MILP kern (PuLP + HiGHS)
+├── entsoe_client.py              # ENTSO-E API wrapper
+├── elia_client.py                # Elia Open Data wrapper
+├── streamlit_dashboard.py        # Legacy dashboard (referentie)
+├── requirements.txt              # Python dependencies
+├── render.yaml                   # Render.com deployment config
+├── start.sh                      # Streamlit startup script (legacy service)
+└── Procfile                      # Alternatief startcommando (uvicorn)
+```
+
+---
+
+## Roadmap
+
+### Fase 1 — Backend (✅ Afgerond)
+- [x] FastAPI backend fundament (routers, schemas, job manager)
+- [x] ENTSO-E dag-ahead prijzen API
+- [x] Elia imbalans + solar/wind data API
+- [x] Async MILP optimalisatie endpoint
+- [x] Render.com deployment configuratie
+
+### Fase 2 — Frontend (🔨 Volgende)
+- [ ] React + Vite project setup
+- [ ] Prijsgrafiek met dag-ahead data (Recharts/Chart.js)
+- [ ] Batterij-optimizer UI (parameters instellen + resultaat visualiseren)
+- [ ] Elia data dashboard (imbalans, solar/wind)
+- [ ] SOC-curve en arbitrage-resultaten weergeven
+
+### Fase 3 — Productie features
+- [ ] Dagelijkse automatisatie (cron na 15:00 ENTSO-E publicatie)
+- [ ] Yuso aggregator koppeling (real-time imbalans + aFRR biedingen)
+- [ ] PV forecast integratie (weer API + eigen verbruiksprofiel)
+- [ ] Multi-asset support (thuisbatterij + EV)
+- [ ] Marstek Venus V3.0 lokale integratie (via Raspberry Pi bridge)
+
+---
+
+## Tech Stack
+
+| Laag | Technologie |
+|---|---|
+| Backend | Python 3.11, FastAPI, Pydantic v2, Uvicorn |
+| Optimalisatie | PuLP, HiGHS solver, Pandas, NumPy |
+| Data | ENTSO-E Transparency Platform, Elia Open Data |
+| Frontend | React, Vite (in ontwikkeling) |
+| Hosting | Render.com (Frankfurt EU) |
+| Versioning | GitHub (syncit-bv/energize) |
+
+---
+
+*SyncIT BV — Belgisch smart energy platform voor prosumers en energy communities.*
