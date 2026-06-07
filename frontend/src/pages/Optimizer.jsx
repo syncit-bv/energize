@@ -363,13 +363,24 @@ export default function Optimizer() {
     e.preventDefault()
     setError(null); setJob(null); setSub(true); setPriceInfo(null)
     try {
-      const pricesData  = await fetchDayAhead(horizonDays + 1)
-      const nowMs       = Date.now()
-      const slotMs      = Math.floor(nowMs / (15 * 60 * 1000)) * 15 * 60 * 1000
-      const priceFloats = pricesData.records
-        .filter(r => new Date(r.timestamp).getTime() >= slotMs)
-        .slice(0, horizonDays * 96)
-        .map(r => r.price_eur_mwh)
+      // Prijzen ophalen: forward-looking (1–3d) vs historisch backtesting (7–365d)
+      const fetchDays   = Math.min(horizonDays, 365)
+      const pricesData  = await fetchDayAhead(fetchDays)
+      let priceFloats
+      if (horizonDays <= 3) {
+        // Forward-looking: filter vanaf nu, neem de volgende horizonDays * 96 slots
+        const nowMs  = Date.now()
+        const slotMs = Math.floor(nowMs / (15 * 60 * 1000)) * 15 * 60 * 1000
+        priceFloats  = pricesData.records
+          .filter(r => new Date(r.timestamp).getTime() >= slotMs)
+          .slice(0, horizonDays * 96)
+          .map(r => r.price_eur_mwh)
+      } else {
+        // Historisch backtesting: neem de laatste horizonDays * 96 slots (gesorteerd oplopend)
+        priceFloats = pricesData.records
+          .slice(-horizonDays * 96)
+          .map(r => r.price_eur_mwh)
+      }
 
       if (priceFloats.length < 4) {
         throw new Error(
@@ -644,18 +655,24 @@ export default function Optimizer() {
               background: 'var(--bg)', borderRadius: 10, padding: 4, marginBottom: 8,
             }}>
               {[
-                { d: 1, label: '1 dag',   sub: '96 slots' },
-                { d: 2, label: '2 dagen', sub: '192 slots' },
-                { d: 3, label: '3 dagen', sub: '288 slots' },
-              ].map(({ d, label, sub }) => {
+                { d: 1,   label: '1 dag',    sub: '96 slots',    hist: false },
+                { d: 2,   label: '2 dagen',  sub: '192 slots',   hist: false },
+                { d: 3,   label: '3 dagen',  sub: '288 slots',   hist: false },
+                { d: 7,   label: '7 dagen',  sub: '~672 slots',  hist: true  },
+                { d: 14,  label: '14 dagen', sub: '~1344 slots', hist: true  },
+                { d: 30,  label: '30 dagen', sub: '~2880 slots', hist: true  },
+                { d: 90,  label: '3 maanden',sub: '~8640 slots', hist: true  },
+                { d: 180, label: '6 maanden',sub: '~17k slots',  hist: true  },
+                { d: 365, label: '1 jaar',   sub: '~35k slots',  hist: true  },
+              ].map(({ d, label, sub, hist }) => {
                 const on = horizonDays === d
                 return (
                   <button key={d} type="button" onClick={() => setHorizonDays(d)} style={{
                     padding: '9px 8px', borderRadius: 8,
-                    border:     on ? '1px solid rgba(59,130,246,0.5)' : '1px solid transparent',
-                    background: on ? 'rgba(59,130,246,0.12)' : 'transparent',
-                    color:      on ? '#60a5fa' : 'var(--muted)',
-                    cursor: 'pointer', fontWeight: on ? 600 : 400, fontSize: 13, transition: 'all 0.15s',
+                    border:     on ? `1px solid rgba(${hist ? '251,146,60' : '59,130,246'},0.5)` : '1px solid transparent',
+                    background: on ? `rgba(${hist ? '251,146,60' : '59,130,246'},0.12)` : 'transparent',
+                    color:      on ? (hist ? '#fb923c' : '#60a5fa') : 'var(--muted)',
+                    cursor: 'pointer', fontWeight: on ? 600 : 400, fontSize: 12, transition: 'all 0.15s',
                     textAlign: 'center',
                   }}>
                     <div>{label}</div>
@@ -664,20 +681,40 @@ export default function Optimizer() {
                 )
               })}
             </div>
-            {horizonDays === 1 ? (
-              <div style={{ color: 'var(--muted2)', fontSize: 11, marginBottom: 8 }}>
-                MILP optimaliseert de komende 24 uur in 1 solver-run.
-              </div>
-            ) : (
-              <div style={{
-                background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.18)',
-                borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
-              }}>
-                🧩 <strong>Rolling horizon:</strong> MILP ziet {horizonDays * 24}h prijzen tegelijk
-                en optimaliseert over de volledige periode in 1 run.{' '}
-                {horizonDays >= 2 && (
+            {horizonDays <= 3 ? (
+              horizonDays === 1 ? (
+                <div style={{ color: 'var(--muted2)', fontSize: 11, marginBottom: 8 }}>
+                  MILP optimaliseert de komende 24 uur in 1 solver-run.
+                </div>
+              ) : (
+                <div style={{
+                  background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.18)',
+                  borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
+                }}>
+                  🧩 <strong>Rolling horizon:</strong> MILP ziet {horizonDays * 24}h prijzen tegelijk
+                  en optimaliseert over de volledige periode in 1 run.{' '}
                   <span style={{ color: 'var(--muted2)' }}>
                     Vereist D+{horizonDays - 1} ENTSO-E prijzen (beschikbaar ~13:00 CET).
+                  </span>
+                </div>
+              )
+            ) : (
+              <div style={{
+                background: 'rgba(251,146,60,0.06)', border: '1px solid rgba(251,146,60,0.25)',
+                borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
+              }}>
+                📊 <strong>Backtesting:</strong> MILP optimaliseert over de afgelopen {
+                  horizonDays === 365 ? '1 jaar' : horizonDays === 180 ? '6 maanden' :
+                  horizonDays === 90 ? '3 maanden' : `${horizonDays} dagen`
+                } historische ENTSO-E prijzen in 1 run.{' '}
+                {horizonDays >= 90 && (
+                  <span style={{ color: '#fb923c', fontWeight: 600 }}>
+                    ⏳ {horizonDays >= 180 ? '10–20 min' : '5–10 min'} rekentijd verwacht.
+                  </span>
+                )}
+                {horizonDays < 90 && (
+                  <span style={{ color: 'var(--muted2)' }}>
+                    ⏳ ~{horizonDays <= 14 ? '30–60 sec' : '2–5 min'} rekentijd.
                   </span>
                 )}
               </div>
