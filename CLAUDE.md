@@ -60,14 +60,15 @@ Recharts SVG kan geen CSS vars → gebruik concrete hex: `rgba(100,116,139,0.25)
 | 22 | Gisteren's SOC als aanbevolen start-SOC | 9832c1c |
 | 29 | Mono vs Driefasig vergelijkingstabel | 1e9e622 |
 | 30 | Battery Sizing Advisor (multi-kWh MILP vergelijking) | 239dc01 |
+| 31 | Battery Sizing: volledig jaar ENTSO-E + annualisering | 9d5b643 |
+| 32 | Elia extra tabbladen: live 5-min onbalans + prognose vs realisatie | be68840 |
+| 33 | Fix Elia Zon&Wind + Prognose tabs: timezone UTC→Brussels + ODS v2.1 paginering (max 100/req) | fb6c691 |
 
 ## Openstaande features
 | # | Feature | Omschrijving |
 |---|---------|-------------|
 | 21 | Scenario vergelijking | Grotendeels afgedekt door #20-vergelijkingskaart; aparte pagina wellicht niet nodig |
-| - | Battery Sizing Advisor | Hoeveel kWh batterij is optimaal voor jouw profiel? |
 | - | Multi-dag MILP horizon | Optimizer over meerdere dagen i.p.v. 1 dag |
-| - | Elia: extra tabbladen | Solar PV forecast, Wind surplus, live imbalans ods161 |
 
 ## Stijl & UX-principes
 - Altijd streven naar beste gebruikerservaring
