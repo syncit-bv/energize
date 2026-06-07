@@ -570,7 +570,7 @@ export default function Optimizer() {
         min_soc:            minSoc,
         min_end_soc:        endSoc,
         discharge_power_kw: dischPow,
-        charge_power_kw:    chargePow,
+        charge_power_kw:    conn.maxAfname,   // MILP moduleert zelf binnen aansluiting
       }
 
       // Hoofd-job: met solar als geconfigureerd (of basis als kWp = 0)
@@ -778,9 +778,12 @@ export default function Optimizer() {
 
             {/* ── Vermogen ── */}
             {sec('Vermogen')}
-            <Slider label="Max laadvermogen net (kW)" value={chargePow}
+            <Slider label="Laadvermogen regelgebaseerd (kW)" value={chargePow}
               min={0.5} max={conn.maxAfname} step={0.5}
               onChange={setChargePow} fmt={v => `${v.toFixed(1)} kW`}/>
+            <div style={{ fontSize: 10, color: 'var(--muted2)', marginTop: -8, marginBottom: 6, paddingLeft: 2 }}>
+              MILP moduleert zelf (max {conn.maxAfname} kW). Forfait Fluvius = min. 2,5 kW.
+            </div>
             <Slider label="Max injectievermogen (kW)" value={dischPow}
               min={0.5} max={conn.maxInjectie} step={0.5}
               onChange={setDischPow} fmt={v => `${v.toFixed(1)} kW`}/>
