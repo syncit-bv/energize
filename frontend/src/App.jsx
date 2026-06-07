@@ -18,7 +18,7 @@ export default function App() {
         <div className="sidebar-logo">
           <span style={{ fontSize: 28 }}>⚡</span>
           <div>
-            <div style={{ fontWeight: 700, color: '#e2e8f0', fontSize: 15 }}>Energize EMS</div>
+            <div style={{ fontWeight: 700, color: '#e2e8f0', fontSize: 17, letterSpacing: '-0.3px' }}>Fluxy</div>
             <div style={{ color: '#4b5563', fontSize: 11 }}>Energy Management System</div>
           </div>
         </div>
