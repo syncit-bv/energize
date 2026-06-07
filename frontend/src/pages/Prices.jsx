@@ -31,7 +31,7 @@ export default function Prices() {
   useEffect(() => {
     setLoading(true); setError(null)
     fetchDayAhead(days)
-      .then(r => setData(r.prices || []))
+      .then(r => setData(r.records || []))
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }, [days])
