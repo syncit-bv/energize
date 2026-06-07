@@ -7,6 +7,21 @@ import {
 import { runOptimization, pollJob, fetchDayAhead, fetchYesterdaySoc, startBatterySizing } from '../api'
 
 const POLL_INTERVAL   = 2000
+
+// Helper: poll een job tot 'completed' of 'failed' en geeft het job-object terug
+function waitForJob(jobId) {
+  return new Promise((resolve, reject) => {
+    const iv = setInterval(async () => {
+      try {
+        const j = await pollJob(jobId)
+        if (j.status === 'completed' || j.status === 'failed') {
+          clearInterval(iv)
+          resolve(j)
+        }
+      } catch (e) { clearInterval(iv); reject(e) }
+    }, 2500)
+  })
+}
 const CAP_EUR_KW_YEAR = 60   // Fluvius capaciteitstarief €/kW/jaar
 
 const CONN = {
@@ -400,6 +415,9 @@ export default function Optimizer() {
   const [dischPow,    setDischPow]    = useState(5.0)
   const [solarKwp,    setSolarKwp]    = useState(0)
   const [schedOpen,   setSchedOpen]   = useState(false)  // Kwartier Schema uitschuifbaar
+  const [rhEnabled,   setRhEnabled]   = useState(false)  // Rolling Horizon MILP aan/uit
+  const [rhResult,    setRhResult]    = useState(null)   // Gecombineerd RH-resultaat
+  const [rhProgress,  setRhProgress]  = useState(null)   // {current, total} | null
 
   // MILP job state — job = MILP+Solar (of basis als kWp=0), jobBase = MILP zonder solar
   const [jobId,      setJobId]     = useState(null)
@@ -521,7 +539,7 @@ export default function Optimizer() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError(null); setJob(null); setJobBase(null); setSub(true); setPriceInfo(null)
-    setJobId(null); setJobIdBase(null)
+    setJobId(null); setJobIdBase(null); setRhResult(null); setRhProgress(null)
     try {
       // Altijd de laatste horizonDays×96 slots: vandaag + N-1 historische dagen
       // Alle horizonten zijn backward-looking: 1d = vandaag, 2d = vandaag + gisteren, etc.
@@ -564,6 +582,51 @@ export default function Optimizer() {
       if (solarForecast) {
         const resBase = await runOptimization(commonPayload)
         setJobIdBase(resBase.job_id)
+      }
+
+      // Rolling Horizon MILP: N dagen × 2-daagse MILP, eind-SOC ketent door naar volgende dag
+      if (rhEnabled && horizonDays >= 2) {
+        ;(async () => {
+          try {
+            const N       = Math.floor(priceFloats.length / 96)
+            let   socFrac = initSoc
+            let   gross   = 0
+            let   allSlots = []
+
+            for (let d = 0; d < N; d++) {
+              setRhProgress({ current: d + 1, total: N })
+              // 2-daags venster: dag d + dag d+1 (of alleen dag d als laatste dag)
+              const chunk = d < N - 1
+                ? priceFloats.slice(d * 96, (d + 2) * 96)
+                : priceFloats.slice(d * 96, (d + 1) * 96)
+
+              const r  = await runOptimization({ ...commonPayload, prices: chunk, initial_soc: socFrac })
+              const rj = await waitForJob(r.job_id)
+              if (rj.status !== 'completed') break
+
+              const daySlots = (rj.result?.schedule || []).slice(0, 96)
+              allSlots = [...allSlots, ...daySlots]
+              if (daySlots.length > 0) {
+                socFrac = (daySlots[daySlots.length - 1].soc_pct ?? 0) / 100
+              }
+              gross += rj.result?.summary?.revenue_execute_eur ?? 0
+            }
+
+            setRhProgress(null)
+            if (allSlots.length > 0) {
+              setRhResult({
+                schedule: allSlots,
+                summary: {
+                  gross_revenue_eur: gross,
+                  final_soc_pct:     allSlots[allSlots.length - 1]?.soc_pct ?? 0,
+                },
+              })
+            }
+          } catch (e) {
+            setRhProgress(null)
+            console.error('RH MILP fout:', e)
+          }
+        })()
       }
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
@@ -889,6 +952,36 @@ export default function Optimizer() {
               )}
             </div>
 
+            {/* Rolling Horizon toggle — alleen zinvol voor ≥ 2 dagen */}
+            {horizonDays >= 2 && (
+              <label style={{
+                display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer',
+                background: rhEnabled ? 'rgba(16,185,129,0.07)' : 'var(--bg)',
+                border: `1px solid ${rhEnabled ? 'rgba(16,185,129,0.35)' : 'var(--border)'}`,
+                borderRadius: 8, padding: '10px 12px', marginBottom: 6, userSelect: 'none',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={rhEnabled}
+                  onChange={e => setRhEnabled(e.target.checked)}
+                  style={{ marginTop: 2, accentColor: '#10b981', width: 14, height: 14, flexShrink: 0 }}
+                />
+                <div>
+                  <div style={{ color: rhEnabled ? '#10b981' : 'var(--text)', fontWeight: 600, fontSize: 13 }}>
+                    🔄 Rolling Horizon MILP
+                  </div>
+                  <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>
+                    {horizonDays === 2
+                      ? '2 runs van elk 2 dagen — optimale eind-SOC doorgeketend.'
+                      : `${horizonDays} sequentiële MILP-runs · elk 2-daags venster · eind-SOC ketent door naar volgende dag.`}
+                    {' '}<span style={{ color: rhEnabled ? '#10b981' : 'var(--muted2)' }}>
+                      ⏳ +{horizonDays <= 7 ? '~1–3 min' : horizonDays <= 30 ? '~5–15 min' : 'lang'} extra rekentijd.
+                    </span>
+                  </div>
+                </div>
+              </label>
+            )}
+
             {error && <div className="error" style={{ marginTop: 8 }}>⚠️ {error}</div>}
 
             <button type="submit" className="btn btn-primary"
@@ -1159,16 +1252,24 @@ export default function Optimizer() {
               {rbResult && bothJobsDone && (() => {
                 // Bouw een flexibele kolomlijst op basis van beschikbare data
                 const show4 = hasSolar && resultBase && rbResultSolar
+                const rhCol = rhResult
+                  ? { key: 'rh', label: '🔄 RH MILP', sub: `${horizonDays}× 2d venster`, color: '#10b981',
+                      rev: rhResult.summary.gross_revenue_eur, net: null,
+                      soc: rhResult.summary.final_soc_pct, cycles: null, solar: null }
+                  : null
+
                 const cols = show4
                   ? [
                       { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur,      net: null, soc: rbResult.summary.final_soc_pct,    cycles: rbResult.summary.partial_cycles,    solar: null },
                       { key: 'rbSol', label: '📏+☀️ Regel+Solar',  sub: `${solarKwp} kWp`,                   color: '#f59e0b', rev: rbResultSolar.summary.gross_revenue_eur,  net: null, soc: rbResultSolar.summary.final_soc_pct, cycles: rbResultSolar.summary.partial_cycles, solar: rbResultSolar.summary.total_solar_kwh },
                       { key: 'milp',  label: '🧮 MILP basis',      sub: 'HiGHS solver',                      color: '#64748b', rev: summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0, net: summaryBase.total_net_revenue_eur, soc: summaryBase.final_soc_pct ?? 0, cycles: null, solar: null },
                       { key: 'milpS', label: '🧮+☀️ MILP+Solar',  sub: `${solarKwp} kWp`,                   color: '#60a5fa', rev: milpGross ?? 0,                            net: summary.total_net_revenue_eur, soc: summary.final_soc_pct ?? 0,   cycles: null, solar: summary.charge_solar_kwh },
+                      ...(rhCol ? [rhCol] : []),
                     ]
                   : [
                       { key: 'milp',  label: '🧮 MILP Optimaal',   sub: 'HiGHS solver',                      color: '#60a5fa', rev: milpGross ?? 0, net: summary.total_net_revenue_eur, soc: summary.final_soc_pct ?? 0, cycles: null, solar: null },
                       { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur, net: null, soc: rbResult.summary.final_soc_pct, cycles: rbResult.summary.partial_cycles, solar: null },
+                      ...(rhCol ? [rhCol] : []),
                     ]
 
                 const maxRev = Math.max(...cols.map(c => c.rev))
@@ -1303,6 +1404,35 @@ export default function Optimizer() {
               {rbResult && hasSolar && result && !jobBase?.result && jobIdBase && (
                 <div className="card" style={{ padding: '14px 22px', border: '1px solid rgba(100,116,139,0.2)' }}>
                   <div className="loading" style={{ margin: 0 }}>Wachten op MILP basis-run voor 4-scenario vergelijking…</div>
+                </div>
+              )}
+
+              {/* Rolling Horizon voortgang */}
+              {rhProgress && (
+                <div className="card" style={{ padding: '14px 22px', border: '1px solid rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.04)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <div style={{ fontSize: 18 }}>🔄</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ color: '#10b981', fontWeight: 600, fontSize: 13 }}>
+                        Rolling Horizon MILP — dag {rhProgress.current} van {rhProgress.total}
+                      </div>
+                      <div style={{
+                        marginTop: 6, height: 6, background: 'var(--border)', borderRadius: 3, overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          height: '100%', background: '#10b981', borderRadius: 3,
+                          width: `${(rhProgress.current / rhProgress.total) * 100}%`,
+                          transition: 'width 0.4s ease',
+                        }}/>
+                      </div>
+                      <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 4 }}>
+                        Elke run optimaliseert een 2-daags venster en ketent de eind-SOC door…
+                      </div>
+                    </div>
+                    <div style={{ color: '#10b981', fontWeight: 700, fontSize: 18 }}>
+                      {Math.round((rhProgress.current / rhProgress.total) * 100)}%
+                    </div>
+                  </div>
                 </div>
               )}
 
