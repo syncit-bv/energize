@@ -568,7 +568,7 @@ export default function Optimizer() {
         efficiency:         eff,
         initial_soc:        initSoc,
         min_soc:            minSoc,
-        min_end_soc:        endSoc,
+        min_end_soc:        minSoc,   // MILP beslist zelf de optimale eind-SOC; enkel harde batterijvloer
         discharge_power_kw: dischPow,
         charge_power_kw:    conn.maxAfname,   // MILP moduleert zelf binnen aansluiting
       }
@@ -603,12 +603,9 @@ export default function Optimizer() {
                 ? priceFloats.slice(d * 96, (d + 2) * 96)
                 : priceFloats.slice(d * 96, (d + 1) * 96)
 
-              // Tussenliggende vensters: min_end_soc = min_soc zodat de solver vrij
-              // de optimale overdrachts-SOC kan kiezen (geen kunstmatige 20%-klem).
-              // Laatste venster: min_end_soc = endSoc voor normale batterijbuffer.
-              const rhEndSoc = isLastDay ? endSoc : minSoc
-
-              const r  = await runOptimization({ ...commonPayload, prices: chunk, initial_soc: socFrac, min_end_soc: rhEndSoc })
+              // Alle vensters: min_end_soc = min_soc zodat de solver de optimale
+              // overdrachts-SOC vrij kan kiezen op basis van de 2-daagse prijslookahead.
+              const r  = await runOptimization({ ...commonPayload, prices: chunk, initial_soc: socFrac })
               const rj = await waitForJob(r.job_id)
               if (rj.status !== 'completed') break
 
@@ -843,7 +840,9 @@ export default function Optimizer() {
               </div>
             ) : null}
             <Slider label="Min reserve"  value={minSoc}  min={0}    max={0.40} step={0.05} onChange={setMinSoc}  fmt={v => `${(v*100).toFixed(0)}%`}/>
-            <Slider label="Min eind-SOC" value={endSoc}  min={0.05} max={0.50} step={0.05} onChange={setEndSoc}  fmt={v => `${(v*100).toFixed(0)}%`}/>
+            <div style={{ fontSize: 10, color: 'var(--muted2)', marginTop: -8, marginBottom: 6, paddingLeft: 2 }}>
+              MILP optimaliseert eind-SOC zelf op basis van day-ahead prijzen. Min reserve = harde batterijvloer.
+            </div>
 
             {/* ── Zonne-energie ── */}
             {sec('Zonne-energie (optioneel)')}
