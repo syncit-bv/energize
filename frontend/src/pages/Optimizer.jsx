@@ -678,6 +678,91 @@ export default function Optimizer() {
             </div>
           </div>
 
+          {/* ── Feature #29: Mono vs Driefasig vergelijking ── */}
+          <div className="card" style={{ padding: '20px 22px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div className="card-title" style={{ margin: 0 }}>⚡ Mono vs Driefasig</div>
+              <div style={{ fontSize: 11, color: 'var(--muted)' }}>aansluiting vergelijking</div>
+            </div>
+
+            {/* Header rij */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 6 }}>
+              <div/>
+              {[['mono', CONN.mono], ['drie', CONN.drie]].map(([key, c]) => {
+                const active = aansluiting === key
+                return (
+                  <div key={key} style={{
+                    background: active ? 'rgba(59,130,246,0.08)' : 'var(--bg)',
+                    border: active ? '1px solid rgba(59,130,246,0.3)' : '1px solid var(--border)',
+                    borderRadius: 8, padding: '7px 10px', textAlign: 'center',
+                  }}>
+                    <div style={{ color: active ? '#60a5fa' : 'var(--muted)', fontWeight: 700, fontSize: 12 }}>{c.label}</div>
+                    <div style={{ color: 'var(--muted2)', fontSize: 10 }}>{c.sub}</div>
+                    {active && <div style={{ fontSize: 9, color: '#60a5fa', marginTop: 2 }}>● actief</div>}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Data rijen */}
+            {[
+              { label: 'Max laadvermogen',  sub: 'van net (laadlimiet)',  mono: `${CONN.mono.maxAfname} kW`,   drie: `${CONN.drie.maxAfname} kW`   },
+              { label: 'Max ontlaadvermogen', sub: 'op net (injectie)',   mono: `${CONN.mono.maxInjectie} kW`, drie: `${CONN.drie.maxInjectie} kW` },
+              { label: 'Cap.tarief / mnd',  sub: `${CAP_EUR_KW_YEAR} €/kW/jaar`,
+                mono: `€${(CONN.mono.maxAfname * CAP_EUR_KW_YEAR / 12).toFixed(2)}`,
+                drie: `€${(CONN.drie.maxAfname * CAP_EUR_KW_YEAR / 12).toFixed(2)}` },
+              { label: 'Cap.tarief / jaar', sub: 'vaste jaarlijkse kost',
+                mono: `€${(CONN.mono.maxAfname * CAP_EUR_KW_YEAR).toFixed(0)}`,
+                drie: `€${(CONN.drie.maxAfname * CAP_EUR_KW_YEAR).toFixed(0)}` },
+              ...(milpGross != null ? [{
+                label: 'MILP bruto / dag', sub: 'huidig resultaat', isRevenue: true,
+                mono: aansluiting === 'mono'
+                  ? `€${milpGross.toFixed(3)}`
+                  : `~€${(milpGross * CONN.mono.maxInjectie / CONN[aansluiting].maxInjectie).toFixed(3)}`,
+                drie: aansluiting === 'drie'
+                  ? `€${milpGross.toFixed(3)}`
+                  : `~€${(milpGross * CONN.drie.maxInjectie / CONN[aansluiting].maxInjectie).toFixed(3)}`,
+                monoEst: aansluiting !== 'mono',
+                drieEst: aansluiting !== 'drie',
+              }] : []),
+            ].map(row => (
+              <div key={row.label} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 6 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+                  <div style={{ color: 'var(--text)', fontSize: 12 }}>{row.label}</div>
+                  <div style={{ color: 'var(--muted2)', fontSize: 10 }}>{row.sub}</div>
+                </div>
+                {[
+                  ['mono', row.mono, row.monoEst],
+                  ['drie', row.drie, row.drieEst],
+                ].map(([key, val, isEst]) => {
+                  const active   = aansluiting === key
+                  const revStyle = row.isRevenue && active
+                  return (
+                    <div key={key} style={{
+                      background: revStyle ? 'rgba(34,197,94,0.06)' : active ? 'rgba(59,130,246,0.05)' : 'var(--bg)',
+                      border: `1px solid ${revStyle ? 'rgba(34,197,94,0.2)' : active ? 'rgba(59,130,246,0.2)' : 'var(--border)'}`,
+                      borderRadius: 6, padding: '7px 10px', textAlign: 'center',
+                    }}>
+                      <div style={{
+                        color:      revStyle ? '#22c55e' : active ? 'var(--text)' : 'var(--muted)',
+                        fontWeight: active ? 700 : 400,
+                        fontSize:   13,
+                      }}>{val}</div>
+                      {isEst && <div style={{ color: 'var(--muted2)', fontSize: 9, marginTop: 1 }}>geschat</div>}
+                    </div>
+                  )
+                })}
+              </div>
+            ))}
+
+            {/* Netto verschil footer */}
+            <div style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)', borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+              💡 Driefasig geeft +{(CONN.drie.maxInjectie - CONN.mono.maxInjectie).toFixed(1)} kW extra ontlaadvermogen,
+              maar kost +€{((CONN.drie.maxAfname - CONN.mono.maxAfname) * CAP_EUR_KW_YEAR / 12).toFixed(2)}/mnd meer
+              aan capaciteitstarief. Driefasig loont bij grote batterijen met hoge arbitrage-spread.
+            </div>
+          </div>
+
           {/* ── Prijzen status ── */}
           {priceInfo && (
             <div style={{

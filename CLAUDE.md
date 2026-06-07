@@ -55,15 +55,16 @@ Recharts SVG kan geen CSS vars → gebruik concrete hex: `rgba(100,116,139,0.25)
 | 14 | D+1 intelligentiepanel op Prijzen-pagina | 629a511 |
 | 20 | Rule-based simulatie + MILP vergelijking | 5c22d02 + 45bae79 |
 | 24 | D+1 prijssignaal — auto-detectie + frontend badge | 95bef41 + a57fbb8 |
-| 25 | 1d default + D+1 overlay op prijsgrafiek | (huidig) |
+| 25 | 1d default + D+1 overlay op prijsgrafiek | 67606bc |
+| 26 | 90d/180d/1j knoppen + Nu-lijn + Rolling horizon | d563e66 |
+| 22 | Gisteren's SOC als aanbevolen start-SOC | 9832c1c |
+| 29 | Mono vs Driefasig vergelijkingstabel | (huidig) |
 
 ## Openstaande features
 | # | Feature | Omschrijving |
 |---|---------|-------------|
-| 21 | Scenario vergelijking | Grotendeels afgedekt door #20-vergelijkingskaart; nagaan of aparte pagina nodig |
-| 22 | Gisteren's SOC als start-SOC | Backend: MILP op gisteren's prijzen → final SOC; Frontend: "Aanbevolen X%" + 1-klik overnemen |
+| 21 | Scenario vergelijking | Grotendeels afgedekt door #20-vergelijkingskaart; aparte pagina wellicht niet nodig |
 | - | Battery Sizing Advisor | Hoeveel kWh batterij is optimaal voor jouw profiel? |
-| - | Mono vs Driefasig vergelijking | Tabel: verschil in capaciteitstarief + opbrengst |
 | - | Multi-dag MILP horizon | Optimizer over meerdere dagen i.p.v. 1 dag |
 | - | Elia: extra tabbladen | Solar PV forecast, Wind surplus, live imbalans ods161 |
 
