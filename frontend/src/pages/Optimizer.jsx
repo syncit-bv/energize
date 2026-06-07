@@ -598,11 +598,17 @@ export default function Optimizer() {
             for (let d = 0; d < N; d++) {
               setRhProgress({ current: d + 1, total: N })
               // 2-daags venster: dag d + dag d+1 (of alleen dag d als laatste dag)
-              const chunk = d < N - 1
+              const isLastDay = d === N - 1
+              const chunk = !isLastDay
                 ? priceFloats.slice(d * 96, (d + 2) * 96)
                 : priceFloats.slice(d * 96, (d + 1) * 96)
 
-              const r  = await runOptimization({ ...commonPayload, prices: chunk, initial_soc: socFrac })
+              // Tussenliggende vensters: min_end_soc = min_soc zodat de solver vrij
+              // de optimale overdrachts-SOC kan kiezen (geen kunstmatige 20%-klem).
+              // Laatste venster: min_end_soc = endSoc voor normale batterijbuffer.
+              const rhEndSoc = isLastDay ? endSoc : minSoc
+
+              const r  = await runOptimization({ ...commonPayload, prices: chunk, initial_soc: socFrac, min_end_soc: rhEndSoc })
               const rj = await waitForJob(r.job_id)
               if (rj.status !== 'completed') break
 
