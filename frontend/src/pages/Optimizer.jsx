@@ -413,6 +413,7 @@ export default function Optimizer() {
   const [eff,         setEff]         = useState(0.92)
   const [horizonDays, setHorizonDays] = useState(1)
   const [dischPow,    setDischPow]    = useState(5.0)
+  const [chargePow,   setChargePow]   = useState(2.5)
   const [solarKwp,    setSolarKwp]    = useState(0)
   const [schedOpen,   setSchedOpen]   = useState(false)  // Kwartier Schema uitschuifbaar
   const [rhEnabled,   setRhEnabled]   = useState(false)  // Rolling Horizon MILP aan/uit
@@ -498,12 +499,13 @@ export default function Optimizer() {
   const [rbDischargeThr, setRbDischargeThr] = useState(120)   // €/MWh
 
   const conn  = CONN[aansluiting]
-  const specs = calcSpecs(battKwh, conn.maxAfname, dischPow, minSoc, eff)
+  const specs = calcSpecs(battKwh, chargePow, dischPow, minSoc, eff)
   const cap   = calcCap(dischPow)
 
-  // Klem discharge bij wisselen aansluiting
+  // Klem laad/ontlaad bij wisselen aansluiting
   useEffect(() => {
-    setDischPow(prev => Math.min(prev, conn.maxInjectie))
+    setDischPow(prev  => Math.min(prev,  conn.maxInjectie))
+    setChargePow(prev => Math.min(prev,  conn.maxAfname))
   }, [aansluiting])
 
   // MILP polling (job = solar/hoofd, jobBase = basis zonder solar)
@@ -568,7 +570,7 @@ export default function Optimizer() {
         min_soc:            minSoc,
         min_end_soc:        endSoc,
         discharge_power_kw: dischPow,
-        charge_power_kw:    conn.maxAfname,
+        charge_power_kw:    chargePow,
       }
 
       // Hoofd-job: met solar als geconfigureerd (of basis als kWp = 0)
@@ -641,9 +643,9 @@ export default function Optimizer() {
     return simulateRuleBased(
       latestPrices,
       { chargeThreshold: rbChargeThr, dischargeThreshold: rbDischargeThr },
-      { battKwh, initSoc, minSoc, efficiency: eff, chargePow: conn.maxAfname, dischargePow: dischPow },
+      { battKwh, initSoc, minSoc, efficiency: eff, chargePow, dischargePow: dischPow },
     )
-  }, [latestPrices, rbChargeThr, rbDischargeThr, battKwh, initSoc, minSoc, eff, conn.maxAfname, dischPow])
+  }, [latestPrices, rbChargeThr, rbDischargeThr, battKwh, initSoc, minSoc, eff, chargePow, dischPow])
 
   // ── Rule-based + Solar (alleen als solarKwp > 0) ──
   const rbResultSolar = useMemo(() => {
@@ -652,7 +654,7 @@ export default function Optimizer() {
     return simulateRuleBased(
       latestPrices,
       { chargeThreshold: rbChargeThr, dischargeThreshold: rbDischargeThr },
-      { battKwh, initSoc, minSoc, efficiency: eff, chargePow: conn.maxAfname, dischargePow: dischPow },
+      { battKwh, initSoc, minSoc, efficiency: eff, chargePow, dischargePow: dischPow },
       sf,
     )
   }, [latestPrices, solarKwp, rbChargeThr, rbDischargeThr, battKwh, initSoc, minSoc, eff, conn.maxAfname, dischPow])
@@ -776,20 +778,12 @@ export default function Optimizer() {
 
             {/* ── Vermogen ── */}
             {sec('Vermogen')}
+            <Slider label="Max laadvermogen net (kW)" value={chargePow}
+              min={0.5} max={conn.maxAfname} step={0.5}
+              onChange={setChargePow} fmt={v => `${v.toFixed(1)} kW`}/>
             <Slider label="Max injectievermogen (kW)" value={dischPow}
               min={0.5} max={conn.maxInjectie} step={0.5}
               onChange={setDischPow} fmt={v => `${v.toFixed(1)} kW`}/>
-            <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              background: 'rgba(34,197,94,0.06)', borderRadius: 7, padding: '8px 12px',
-              border: '1px solid rgba(34,197,94,0.12)', marginBottom: 4,
-            }}>
-              <span style={{ color: 'var(--muted)', fontSize: 13 }}>Laadvermogen MILP</span>
-              <span style={{ color: '#22c55e', fontWeight: 700, fontSize: 14 }}>
-                {conn.maxAfname} kW
-                <span style={{ color: 'var(--muted2)', fontWeight: 400, fontSize: 11, marginLeft: 6 }}>auto</span>
-              </span>
-            </div>
 
             {/* ── Batterij ── */}
             {sec('Batterij')}
