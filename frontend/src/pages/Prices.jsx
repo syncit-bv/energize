@@ -71,6 +71,16 @@ export default function Prices() {
       .finally(() => setLoading(false))
   }, [fetchDays])
 
+  // 15 min auto-refresh: verse kwartierdata + Nu-lijn positie
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetchDayAhead(fetchDays)
+        .then(r => setData(r.records || []))
+        .catch(() => {})
+    }, 15 * 60 * 1000)  // 900 000 ms — matcht ENTSO-E kwartierresolutie
+    return () => clearInterval(id)
+  }, [fetchDays])
+
   // D+1 status pollen — elke 5 min
   useEffect(() => {
     const poll = async () => {
