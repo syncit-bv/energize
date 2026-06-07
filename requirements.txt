@@ -15,6 +15,7 @@ entsoe-py>=0.6
 
 # Caching & jobs
 cachetools>=5.3
+apscheduler>=3.10,<4
 
 # Optioneel voor productie job queue:
 # celery>=5.3

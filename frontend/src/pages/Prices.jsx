@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   AreaChart, Area, BarChart, Bar, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts'
-import { fetchDayAhead } from '../api'
+import { fetchDayAhead, fetchTomorrowStatus } from '../api'
 import { format, parseISO, addDays, startOfDay } from 'date-fns'
 
 const fmt  = (ts) => { try { return format(parseISO(ts), 'dd/MM HH:mm') } catch { return ts } }
@@ -31,17 +31,41 @@ function barColor(p) {
 }
 
 export default function Prices() {
-  const [data,    setData]    = useState([])
-  const [days,    setDays]    = useState(7)
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState(null)
+  const [data,           setData]           = useState([])
+  const [days,           setDays]           = useState(7)
+  const [loading,        setLoading]        = useState(true)
+  const [error,          setError]          = useState(null)
+  const [tomorrowStatus, setTomorrowStatus] = useState(null)
+  const [justArrived,    setJustArrived]    = useState(false)
+  const prevAvailableRef = useRef(false)
 
+  // Prijsdata ophalen
   useEffect(() => {
     setLoading(true); setError(null)
     fetchDayAhead(days)
       .then(r => setData(r.records || []))
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
+  }, [days])
+
+  // D+1 status pollen — elke 2 min
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const status = await fetchTomorrowStatus()
+        // Prijzen net beschikbaar gekomen → auto-refresh + notificatie
+        if (!prevAvailableRef.current && status.available) {
+          setJustArrived(true)
+          setTimeout(() => setJustArrived(false), 15_000)
+          fetchDayAhead(days).then(r => setData(r.records || []))
+        }
+        prevAvailableRef.current = status.available
+        setTomorrowStatus(status)
+      } catch { /* stille fout — badge toont niets */ }
+    }
+    poll()
+    const id = setInterval(poll, 120_000)
+    return () => clearInterval(id)
   }, [days])
 
   // Overall stats
@@ -79,6 +103,41 @@ export default function Prices() {
       if (avg > maxAvg) { maxAvg = avg; bestSell   = { ts: d1Records[i].timestamp, end: d1Records[Math.min(i+4, d1Records.length-1)].timestamp, avg } }
     }
   }
+
+  // D+1 status badge — toont live staat van morgen's prijzen
+  const nowHour        = new Date().getHours()
+  const isPollingWindow = nowHour >= 12 && nowHour < 18
+  const fmtTime = (isoStr) => {
+    try { return new Date(isoStr).toLocaleTimeString('nl-BE', { hour:'2-digit', minute:'2-digit' }) }
+    catch { return '–' }
+  }
+
+  const statusBadge = (() => {
+    if (!tomorrowStatus) return (
+      <span style={{ color:'var(--muted)', fontSize:12 }}>
+        ENTSO-E publiceert morgen-prijzen doorgaans na 13:00 CET
+      </span>
+    )
+    if (tomorrowStatus.available) return (
+      <span style={{ display:'flex', alignItems:'center', gap:6, color:'#22c55e', fontSize:12, fontWeight:600 }}>
+        <span style={{ width:8, height:8, borderRadius:'50%', background:'#22c55e', flexShrink:0,
+          animation:'pulse 2s ease-in-out infinite' }}/>
+        Beschikbaar om {fmtTime(tomorrowStatus.first_available_at)}
+      </span>
+    )
+    if (isPollingWindow) return (
+      <span style={{ display:'flex', alignItems:'center', gap:6, color:'#f59e0b', fontSize:12 }}>
+        <span style={{ display:'inline-block', animation:'spin 1.2s linear infinite', lineHeight:1 }}>↻</span>
+        Controleren… {tomorrowStatus.checked_at ? `laatste check ${fmtTime(tomorrowStatus.checked_at)}` : ''}
+      </span>
+    )
+    if (nowHour < 12) return (
+      <span style={{ color:'var(--muted)', fontSize:12 }}>⏰ Verwacht na 13:00 CET</span>
+    )
+    return (
+      <span style={{ color:'#f97316', fontSize:12 }}>⚠️ Vertraagd — we blijven controleren</span>
+    )
+  })()
 
   // Chart data
   const chartData = data.map(d => ({
@@ -138,6 +197,26 @@ export default function Prices() {
           border:     hasTomorrow ? '1px solid rgba(59,130,246,0.35)' : '1px solid rgba(255,255,255,0.06)',
           background: hasTomorrow ? 'rgba(59,130,246,0.04)' : 'transparent',
         }}>
+
+          {/* "Net beschikbaar" notificatie — verdwijnt na 15s */}
+          {justArrived && (
+            <div style={{
+              background:'rgba(34,197,94,0.10)', border:'1px solid rgba(34,197,94,0.35)',
+              borderRadius:8, padding:'12px 16px', marginBottom:16,
+              display:'flex', alignItems:'center', gap:12,
+            }}>
+              <span style={{ fontSize:22 }}>✅</span>
+              <div>
+                <div style={{ color:'#22c55e', fontWeight:700, fontSize:14 }}>
+                  Morgen-prijzen zijn net beschikbaar!
+                </div>
+                <div style={{ color:'var(--muted)', fontSize:12, marginTop:2 }}>
+                  Data automatisch herladen — D+1 intelligentie is nu zichtbaar.
+                </div>
+              </div>
+            </div>
+          )}
+
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
             marginBottom: hasTomorrow ? 16 : 0 }}>
             <div className="card-title" style={{ margin:0 }}>
@@ -145,11 +224,7 @@ export default function Prices() {
                 ? `🎯 D+1 Prijsintelligentie — ${d1Date}`
                 : '⏳ D+1 nog niet beschikbaar'}
             </div>
-            {!hasTomorrow && (
-              <span style={{ color:'var(--muted)', fontSize:12 }}>
-                ENTSO-E publiceert morgen-prijzen doorgaans na 13:00 CET
-              </span>
-            )}
+            {statusBadge}
           </div>
 
           {hasTomorrow && (

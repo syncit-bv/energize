@@ -1,16 +1,77 @@
-"""Prijsdata endpoints — /api/prices/day-ahead  en  /api/prices/history"""
+"""Prijsdata endpoints — /api/prices/day-ahead, /api/prices/history,
+                         /api/prices/tomorrow/status, /api/prices/tomorrow/check"""
 from __future__ import annotations
 
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.models.schemas import PriceRecord, PricesResponse, PriceSource
 
-logger = logging.getLogger(__name__)
-router = APIRouter(tags=["prices"])
+logger    = logging.getLogger(__name__)
+router    = APIRouter(tags=["prices"])
+_BRUSSELS = ZoneInfo("Europe/Brussels")
+
+# ---------------------------------------------------------------------------
+# D+1 in-memory cache (reset elke dag automatisch)
+# ---------------------------------------------------------------------------
+_tomorrow_cache: dict = {
+    "available":          False,
+    "first_available_at": None,   # ISO-8601 string, Brussels TZ
+    "checked_at":         None,   # ISO-8601 string, Brussels TZ
+    "prices_count":       0,
+    "date":               None,   # "YYYY-MM-DD" van morgen
+}
+
+
+async def check_tomorrow_prices_task() -> None:
+    """
+    Achtergrondtaak: pollt ENTSO-E voor morgen's dag-ahead prijzen.
+    Draait via APScheduler (12:00–17:00 CET, elke 5 min) én bij startup
+    als we al binnen het publicatievenster vallen.
+    """
+    tomorrow = date.today() + timedelta(days=1)
+    now_str  = datetime.now(_BRUSSELS).isoformat(timespec="seconds")
+
+    # Reset cache als de dag veranderd is (middernacht)
+    if _tomorrow_cache["date"] and _tomorrow_cache["date"] != str(tomorrow):
+        _tomorrow_cache.update({
+            "available": False, "first_available_at": None,
+            "prices_count": 0,  "date": None,
+        })
+
+    api_key = os.getenv("ENTSOE_API_KEY", "")
+    if not api_key:
+        logger.warning("[D+1] ENTSOE_API_KEY niet ingesteld — check overgeslagen")
+        _tomorrow_cache["checked_at"] = now_str
+        return
+
+    try:
+        from entsoe_client import EntsoeClient
+        client = EntsoeClient(api_key=api_key)
+        df = client.get_day_ahead_prices(
+            start=tomorrow, end=tomorrow + timedelta(days=1)
+        )
+
+        if df is not None and not df.empty and len(df) >= 4:
+            count = len(df)
+            if not _tomorrow_cache["available"]:
+                logger.info("[D+1] ✅ Prijzen beschikbaar! %d records voor %s", count, tomorrow)
+                _tomorrow_cache["first_available_at"] = now_str
+            _tomorrow_cache["available"]    = True
+            _tomorrow_cache["prices_count"] = count
+        else:
+            logger.info("[D+1] Nog niet beschikbaar voor %s", tomorrow)
+
+        _tomorrow_cache["date"]       = str(tomorrow)
+        _tomorrow_cache["checked_at"] = now_str
+
+    except Exception as exc:
+        logger.warning("[D+1] Check mislukt: %s", exc)
+        _tomorrow_cache["checked_at"] = now_str
 
 
 def _get_entsoe_client():
@@ -110,3 +171,45 @@ async def get_price_history(
         records=records,
         count=len(records),
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/prices/tomorrow/status  — live badge in de frontend
+# ---------------------------------------------------------------------------
+
+@router.get("/prices/tomorrow/status")
+async def get_tomorrow_status():
+    """
+    Status van morgen's dag-ahead prijzen.
+    Geeft terug of ze beschikbaar zijn, wanneer ze voor het eerst gezien werden,
+    en wanneer de laatste check was. Frontend pollt dit elke 2 minuten.
+    """
+    tomorrow = str(date.today() + timedelta(days=1))
+    # Reset bij datumovergang (middernacht)
+    if _tomorrow_cache.get("date") and _tomorrow_cache["date"] != tomorrow:
+        _tomorrow_cache.update({
+            "available": False, "first_available_at": None,
+            "prices_count": 0,  "date": None, "checked_at": None,
+        })
+    return {
+        "available":          _tomorrow_cache["available"],
+        "date":               tomorrow,
+        "first_available_at": _tomorrow_cache["first_available_at"],
+        "checked_at":         _tomorrow_cache["checked_at"],
+        "prices_count":       _tomorrow_cache["prices_count"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/prices/tomorrow/check  — handmatige / geforceerde controle
+# ---------------------------------------------------------------------------
+
+@router.post("/prices/tomorrow/check")
+async def trigger_tomorrow_check():
+    """Forceert een onmiddellijke controle van morgen's prijzen."""
+    await check_tomorrow_prices_task()
+    return {
+        "triggered":  True,
+        "available":  _tomorrow_cache["available"],
+        "checked_at": _tomorrow_cache["checked_at"],
+    }

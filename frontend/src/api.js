@@ -11,6 +11,13 @@ export const fetchDayAhead = (days = 7) =>
 export const fetchHistory = (days = 30) =>
   api.get('/api/prices/history', { params: { days } }).then(r => r.data)
 
+// D+1 prijssignaal
+export const fetchTomorrowStatus = () =>
+  api.get('/api/prices/tomorrow/status').then(r => r.data)
+
+export const triggerTomorrowCheck = () =>
+  api.post('/api/prices/tomorrow/check').then(r => r.data)
+
 // Elia
 export const fetchImbalance = (date) =>
   api.get('/api/elia/imbalance', { params: { date } }).then(r => r.data)
