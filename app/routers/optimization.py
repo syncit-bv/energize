@@ -1,9 +1,12 @@
-"""MILP optimalisatie endpoint — POST /api/optimization/run"""
+"""MILP optimalisatie endpoint — POST /api/optimization/run
+                                  GET  /api/optimization/yesterday-soc"""
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -14,6 +17,16 @@ from app.services.job_manager import job_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["optimization"])
+
+# ---------------------------------------------------------------------------
+# Gisteren's SOC cache (reset elke dag automatisch)
+# ---------------------------------------------------------------------------
+_yesterday_soc_cache: dict = {
+    "date":          None,   # "YYYY-MM-DD" van gisteren
+    "final_soc_pct": None,   # finale SOC in % (0–100)
+    "computed_at":   None,   # ISO-8601 UTC
+    "status":        None,   # "ok" of foutmelding
+}
 
 
 def _build_prices_df(prices: List[float]) -> pd.DataFrame:
@@ -212,3 +225,87 @@ async def run_optimization(req: OptimizeRequest, background_tasks: BackgroundTas
     )
 
     return JobResponse(job_id=job_id, status=JobStatus.pending, progress=0)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/optimization/yesterday-soc
+# ---------------------------------------------------------------------------
+
+@router.get("/optimization/yesterday-soc")
+async def get_yesterday_soc():
+    """
+    Berekent de optimale finale SOC van gisteren via MILP met standaard parameters.
+    Geeft de aanbevolen start-SOC voor vandaag terug.
+    Resultaat wordt gecached voor de rest van de dag (reset bij datumovergang).
+    """
+    yesterday = str(date.today() - timedelta(days=1))
+
+    # Gebruik cache als die nog van gisteren is
+    if _yesterday_soc_cache["date"] == yesterday and _yesterday_soc_cache["final_soc_pct"] is not None:
+        logger.debug("[yesterday-soc] Cache hit voor %s", yesterday)
+        return _yesterday_soc_cache
+
+    api_key = os.getenv("ENTSOE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ENTSOE_API_KEY niet geconfigureerd.")
+
+    # Haal gisteren's prijzen op
+    try:
+        from entsoe_client import EntsoeClient
+        yesterday_date = date.today() - timedelta(days=1)
+        client = EntsoeClient(api_key=api_key)
+        df = client.get_day_ahead_prices(start=yesterday_date, end=date.today())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("[yesterday-soc] ENTSO-E fetch mislukt: %s", exc)
+        raise HTTPException(status_code=502, detail=f"ENTSO-E fetch mislukt: {exc}")
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="Geen prijsdata beschikbaar voor gisteren.")
+
+    prices = list(df["price_eur_mwh"].astype(float))
+
+    # Run MILP in threadpool executor (synchrone PuLP/HiGHS mag event loop niet blokkeren)
+    def _run_milp_yesterday() -> tuple[float | None, str]:
+        try:
+            import milp_optimizer as mo
+            import pandas as pd
+            base = datetime.now(tz=timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) - timedelta(days=1)
+            timestamps = pd.date_range(start=base, periods=len(prices), freq="15min", tz="UTC")
+            prices_df = pd.DataFrame({"datetime": timestamps, "price_eur_mwh": prices})
+            with job_manager.milp_semaphore:
+                result_df, _ = mo.optimize_battery_schedule(
+                    prices_df       = prices_df,
+                    battery_kwh     = 10.0,
+                    max_power_kw    = 5.0,
+                    charge_power_kw = 5.0,
+                    efficiency      = 0.95,
+                    initial_soc     = 0.5,
+                    min_soc         = 0.1,
+                    min_end_soc     = 0.1,
+                )
+            final_soc = float(result_df["soc_pct"].iloc[-1])
+            return round(final_soc, 1), "ok"
+        except Exception as exc:
+            logger.warning("[yesterday-soc] MILP mislukt: %s", exc)
+            return None, str(exc)
+
+    loop = asyncio.get_event_loop()
+    final_soc_pct, status = await loop.run_in_executor(None, _run_milp_yesterday)
+
+    now_str = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _yesterday_soc_cache.update({
+        "date":          yesterday,
+        "final_soc_pct": final_soc_pct,
+        "computed_at":   now_str,
+        "status":        status,
+    })
+
+    if final_soc_pct is None:
+        raise HTTPException(status_code=500, detail=f"MILP berekening mislukt: {status}")
+
+    logger.info("[yesterday-soc] ✅ Finale SOC gisteren: %.1f%% (berekend op %s)", final_soc_pct, now_str)
+    return _yesterday_soc_cache

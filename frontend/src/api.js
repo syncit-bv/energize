@@ -31,3 +31,7 @@ export const runOptimization = (payload) =>
 
 export const pollJob = (jobId) =>
   api.get(`/api/jobs/${jobId}`).then(r => r.data)
+
+// Feature #22: aanbevolen start-SOC op basis van gisteren's MILP-resultaat
+export const fetchYesterdaySoc = () =>
+  api.get('/api/optimization/yesterday-soc').then(r => r.data)

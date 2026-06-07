@@ -3,7 +3,7 @@ import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from 'recharts'
-import { runOptimization, pollJob, fetchDayAhead } from '../api'
+import { runOptimization, pollJob, fetchDayAhead, fetchYesterdaySoc } from '../api'
 
 const POLL_INTERVAL   = 2000
 const CAP_EUR_KW_YEAR = 60   // Fluvius capaciteitstarief €/kW/jaar
@@ -267,6 +267,17 @@ export default function Optimizer() {
   const [priceInfo,  setPriceInfo] = useState(null)
   const pollRef = useRef(null)
 
+  // Feature #22: aanbevolen start-SOC (gisteren's finale SOC via MILP)
+  const [yesterdaySoc,        setYesterdaySoc]        = useState(null)
+  const [yesterdaySocLoading, setYesterdaySocLoading] = useState(true)
+
+  useEffect(() => {
+    fetchYesterdaySoc()
+      .then(d => setYesterdaySoc(d))
+      .catch(() => {})  // stil falen — badge verschijnt gewoon niet
+      .finally(() => setYesterdaySocLoading(false))
+  }, [])
+
   // Opgeslagen prijzen voor rule-based (worden ingesteld zodra ENTSO-E fetch klaar is)
   const [latestPrices, setLatestPrices] = useState(null)  // number[]
 
@@ -488,6 +499,39 @@ export default function Optimizer() {
             {/* ── State of Charge ── */}
             {sec('State of Charge')}
             <Slider label="Start SOC"    value={initSoc} min={0.05} max={1}    step={0.05} onChange={setInitSoc} fmt={v => `${(v*100).toFixed(0)}%`}/>
+            {/* Feature #22: aanbevolen start-SOC badge */}
+            {yesterdaySocLoading ? (
+              <div style={{ fontSize: 11, color: 'var(--muted2)', marginBottom: 8, paddingLeft: 2 }}>
+                ⏳ Aanbevolen SOC berekenen…
+              </div>
+            ) : yesterdaySoc?.final_soc_pct != null ? (
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)',
+                borderRadius: 7, padding: '7px 12px', marginBottom: 8, fontSize: 12,
+              }}>
+                <span style={{ color: 'var(--muted)' }}>
+                  💡 Aanbevolen start-SOC&nbsp;
+                  <strong style={{ color: '#22c55e' }}>
+                    {yesterdaySoc.final_soc_pct.toFixed(0)}%
+                  </strong>
+                  <span style={{ color: 'var(--muted2)', marginLeft: 4 }}>
+                    (finale SOC gisteren)
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setInitSoc(Math.round(yesterdaySoc.final_soc_pct) / 100)}
+                  style={{
+                    background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.3)',
+                    borderRadius: 5, padding: '3px 9px', color: '#22c55e',
+                    cursor: 'pointer', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap',
+                  }}
+                >
+                  Overnemen →
+                </button>
+              </div>
+            ) : null}
             <Slider label="Min reserve"  value={minSoc}  min={0}    max={0.40} step={0.05} onChange={setMinSoc}  fmt={v => `${(v*100).toFixed(0)}%`}/>
             <Slider label="Min eind-SOC" value={endSoc}  min={0.05} max={0.50} step={0.05} onChange={setEndSoc}  fmt={v => `${(v*100).toFixed(0)}%`}/>
 
