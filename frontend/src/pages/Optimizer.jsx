@@ -1252,27 +1252,64 @@ export default function Optimizer() {
               {rbResult && bothJobsDone && (() => {
                 // Bouw een flexibele kolomlijst op basis van beschikbare data
                 const show4 = hasSolar && resultBase && rbResultSolar
+                // Helper: piek netafname kW uit een schedule (grid-only)
+                const peakGridKwFromSched = (sched, hasSolarSlots = false) => {
+                  if (!sched?.length) return 0
+                  return Math.max(0, ...sched.map(s => {
+                    const grid = hasSolarSlots
+                      ? Math.max(0, (s.charge_kwh || 0) - (s.charge_solar_kwh || 0))
+                      : Math.max(0, s.charge_kwh || 0)
+                    return grid * 4  // kWh/15min-slot → kW
+                  }))
+                }
+                const periodFrac = horizonDays / 365
+
+                // Cap cost MILP: backend berekent autoritatief (gross − net)
+                const capMilpS  = (milpGross ?? 0) - (summary.total_net_revenue_eur ?? milpGross ?? 0)
+                const capMilpB  = show4
+                  ? ((summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0) - (summaryBase.total_net_revenue_eur ?? summaryBase.revenue_execute_eur ?? 0))
+                  : 0
+                // Piek kW MILP: terugrekenen uit cap cost (of uit schedule als cap = 0)
+                const peakMilpS = periodFrac > 0 && capMilpS > 0.0001
+                  ? capMilpS / (CAP_EUR_KW_YEAR * periodFrac)
+                  : peakGridKwFromSched(schedule)
+                const peakMilpB = periodFrac > 0 && capMilpB > 0.0001
+                  ? capMilpB / (CAP_EUR_KW_YEAR * periodFrac)
+                  : peakGridKwFromSched(resultBase?.schedule)
+
+                // Cap cost regel-gebaseerd: berekend uit schedule piek
+                const peakRb  = peakGridKwFromSched(rbResult.schedule, true)
+                const capRb   = peakRb * CAP_EUR_KW_YEAR * periodFrac
+                const peakRbS = peakGridKwFromSched(rbResultSolar?.schedule, true)
+                const capRbS  = peakRbS * CAP_EUR_KW_YEAR * periodFrac
+
+                // Cap cost RH MILP: berekend uit gecombineerd schedule
+                const peakRh  = peakGridKwFromSched(rhResult?.schedule)
+                const capRh   = peakRh * CAP_EUR_KW_YEAR * periodFrac
+
                 const rhCol = rhResult
                   ? { key: 'rh', label: '🔄 RH MILP', sub: `${horizonDays}× 2d venster`, color: '#10b981',
-                      rev: rhResult.summary.gross_revenue_eur, net: null,
+                      rev: rhResult.summary.gross_revenue_eur,
+                      cap: capRh, peak: peakRh,
+                      net: rhResult.summary.gross_revenue_eur - capRh,
                       soc: rhResult.summary.final_soc_pct, cycles: null, solar: null }
                   : null
 
                 const cols = show4
                   ? [
-                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur,      net: null, soc: rbResult.summary.final_soc_pct,    cycles: rbResult.summary.partial_cycles,    solar: null },
-                      { key: 'rbSol', label: '📏+☀️ Regel+Solar',  sub: `${solarKwp} kWp`,                   color: '#f59e0b', rev: rbResultSolar.summary.gross_revenue_eur,  net: null, soc: rbResultSolar.summary.final_soc_pct, cycles: rbResultSolar.summary.partial_cycles, solar: rbResultSolar.summary.total_solar_kwh },
-                      { key: 'milp',  label: '🧮 MILP basis',      sub: 'HiGHS solver',                      color: '#64748b', rev: summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0, net: summaryBase.total_net_revenue_eur, soc: summaryBase.final_soc_pct ?? 0, cycles: null, solar: null },
-                      { key: 'milpS', label: '🧮+☀️ MILP+Solar',  sub: `${solarKwp} kWp`,                   color: '#60a5fa', rev: milpGross ?? 0,                            net: summary.total_net_revenue_eur, soc: summary.final_soc_pct ?? 0,   cycles: null, solar: summary.charge_solar_kwh },
+                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur,     cap: capRb,   peak: peakRb,   net: rbResult.summary.gross_revenue_eur      - capRb,  soc: rbResult.summary.final_soc_pct,    cycles: rbResult.summary.partial_cycles,    solar: null },
+                      { key: 'rbSol', label: '📏+☀️ Regel+Solar',  sub: `${solarKwp} kWp`,                   color: '#f59e0b', rev: rbResultSolar.summary.gross_revenue_eur, cap: capRbS,  peak: peakRbS,  net: rbResultSolar.summary.gross_revenue_eur - capRbS, soc: rbResultSolar.summary.final_soc_pct, cycles: rbResultSolar.summary.partial_cycles, solar: rbResultSolar.summary.total_solar_kwh },
+                      { key: 'milp',  label: '🧮 MILP basis',      sub: 'HiGHS solver',                      color: '#64748b', rev: summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0, cap: capMilpB, peak: peakMilpB, net: summaryBase.total_net_revenue_eur ?? ((summaryBase.revenue_execute_eur ?? 0) - capMilpB), soc: summaryBase.final_soc_pct ?? 0, cycles: null, solar: null },
+                      { key: 'milpS', label: '🧮+☀️ MILP+Solar',  sub: `${solarKwp} kWp`,                   color: '#60a5fa', rev: milpGross ?? 0,                           cap: capMilpS, peak: peakMilpS, net: summary.total_net_revenue_eur ?? ((milpGross ?? 0) - capMilpS),                                                                   soc: summary.final_soc_pct ?? 0,   cycles: null, solar: summary.charge_solar_kwh },
                       ...(rhCol ? [rhCol] : []),
                     ]
                   : [
-                      { key: 'milp',  label: '🧮 MILP Optimaal',   sub: 'HiGHS solver',                      color: '#60a5fa', rev: milpGross ?? 0, net: summary.total_net_revenue_eur, soc: summary.final_soc_pct ?? 0, cycles: null, solar: null },
-                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur, net: null, soc: rbResult.summary.final_soc_pct, cycles: rbResult.summary.partial_cycles, solar: null },
+                      { key: 'milp',  label: '🧮 MILP Optimaal',   sub: 'HiGHS solver',                      color: '#60a5fa', rev: milpGross ?? 0, cap: capMilpS, peak: peakMilpS, net: summary.total_net_revenue_eur ?? ((milpGross ?? 0) - capMilpS), soc: summary.final_soc_pct ?? 0, cycles: null, solar: null },
+                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur, cap: capRb, peak: peakRb, net: rbResult.summary.gross_revenue_eur - capRb, soc: rbResult.summary.final_soc_pct, cycles: rbResult.summary.partial_cycles, solar: null },
                       ...(rhCol ? [rhCol] : []),
                     ]
 
-                const maxRev = Math.max(...cols.map(c => c.rev))
+                const maxNet = Math.max(...cols.map(c => c.net ?? c.rev))
                 const colCount = cols.length
 
                 const cell = (content) => (
@@ -1313,11 +1350,11 @@ export default function Optimizer() {
                           background: `rgba(${c.color === '#60a5fa' ? '59,130,246' : c.color === '#a855f7' ? '168,85,247' : c.color === '#f59e0b' ? '245,158,11' : '100,116,139'},0.1)`,
                           border: `1px solid ${c.color}44`,
                           borderRadius: 8, padding: '8px 6px', textAlign: 'center',
-                          outline: c.rev === maxRev && c.rev > 0 ? `2px solid ${c.color}` : 'none',
+                          outline: (c.net ?? c.rev) === maxNet && maxNet > 0 ? `2px solid ${c.color}` : 'none',
                         }}>
                           <div style={{ color: c.color, fontWeight: 700, fontSize: 11 }}>{c.label}</div>
                           <div style={{ color: 'var(--muted)', fontSize: 9, marginTop: 1 }}>{c.sub}</div>
-                          {c.rev === maxRev && c.rev > 0 && (
+                          {(c.net ?? c.rev) === maxNet && maxNet > 0 && (
                             <div style={{ color: '#22c55e', fontSize: 9, marginTop: 2, fontWeight: 700 }}>🏆 best</div>
                           )}
                         </div>
@@ -1329,12 +1366,22 @@ export default function Optimizer() {
                         <span style={{ color: c.color, fontWeight: 700, fontSize: 14 }}>€{c.rev.toFixed(3)}</span>
                       ))}
 
+                      {/* Piek netafname */}
+                      {rowLabel('Piek netafname')}
+                      {cols.map(c => cell(
+                        <span style={{ color: '#64748b', fontWeight: 600, fontSize: 13 }}>{(c.peak ?? 0).toFixed(2)} kW</span>
+                      ))}
+
+                      {/* Capaciteitstarief (kost) */}
+                      {rowLabel('Capaciteitstarief (kost)')}
+                      {cols.map(c => cell(
+                        <span style={{ color: '#ef4444', fontWeight: 700, fontSize: 13 }}>−€{(c.cap ?? 0).toFixed(3)}</span>
+                      ))}
+
                       {/* Netto na cap.tarief */}
                       {rowLabel('Netto (na cap.tarief)')}
                       {cols.map(c => cell(
-                        c.net != null
-                          ? <span style={{ color: c.net >= 0 ? '#22c55e' : '#ef4444', fontWeight: 700, fontSize: 13 }}>€{c.net.toFixed(3)}</span>
-                          : <span style={{ color: 'var(--muted)', fontSize: 10 }}>cap.tarief zelfde</span>
+                        <span style={{ color: (c.net ?? 0) >= 0 ? '#22c55e' : '#ef4444', fontWeight: 700, fontSize: 13 }}>€{(c.net ?? 0).toFixed(3)}</span>
                       ))}
 
                       {/* Eind-SOC */}
@@ -1364,11 +1411,11 @@ export default function Optimizer() {
 
                     {/* Beste vs slechtste banner */}
                     {(() => {
-                      const best  = cols.reduce((a, b) => a.rev > b.rev ? a : b)
-                      const worst = cols.reduce((a, b) => a.rev < b.rev ? a : b)
+                      const best  = cols.reduce((a, b) => (a.net ?? a.rev) > (b.net ?? b.rev) ? a : b)
+                      const worst = cols.reduce((a, b) => (a.net ?? a.rev) < (b.net ?? b.rev) ? a : b)
                       if (best.key === worst.key) return null
-                      const gain = best.rev - worst.rev
-                      const pct  = worst.rev !== 0 ? gain / Math.abs(worst.rev) * 100 : 0
+                      const gain = (best.net ?? best.rev) - (worst.net ?? worst.rev)
+                      const pct  = (worst.net ?? worst.rev) !== 0 ? gain / Math.abs(worst.net ?? worst.rev) * 100 : 0
                       return (
                         <div style={{
                           background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.2)',
@@ -1392,8 +1439,8 @@ export default function Optimizer() {
                     })()}
 
                     <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 10 }}>
-                      ℹ️ Capaciteitstarief is identiek voor alle strategieën.
-                      {show4 && ' Solar PV: regelgebaseerd laadt batterij via solar als er ruimte is; MILP optimaliseert de volgorde globaal.'}
+                      ℹ️ Capaciteitstarief = piek netafname (kW) × €{CAP_EUR_KW_YEAR}/kW/jaar × {horizonDays} dag{horizonDays !== 1 ? 'en' : ''} / 365. De maatstaf is de hoogste 15-min vermogenspiek die van het net wordt geladen.
+                      {show4 && ' Solar PV: regelgebaseerd laadt via solar als er ruimte is; MILP optimaliseert globaal.'}
                       {horizonDays >= 7 && ' · Klik "Exporteer rapport" voor dagelijks CSV-overzicht.'}
                     </div>
                   </div>
