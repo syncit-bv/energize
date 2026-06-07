@@ -58,7 +58,8 @@ Recharts SVG kan geen CSS vars → gebruik concrete hex: `rgba(100,116,139,0.25)
 | 25 | 1d default + D+1 overlay op prijsgrafiek | 67606bc |
 | 26 | 90d/180d/1j knoppen + Nu-lijn + Rolling horizon | d563e66 |
 | 22 | Gisteren's SOC als aanbevolen start-SOC | 9832c1c |
-| 29 | Mono vs Driefasig vergelijkingstabel | (huidig) |
+| 29 | Mono vs Driefasig vergelijkingstabel | 1e9e622 |
+| 30 | Battery Sizing Advisor (multi-kWh MILP vergelijking) | 239dc01 |
 
 ## Openstaande features
 | # | Feature | Omschrijving |
