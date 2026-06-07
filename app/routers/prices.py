@@ -104,7 +104,7 @@ def _df_to_records(df) -> list:
 
 @router.get("/prices/day-ahead", response_model=PricesResponse)
 async def get_day_ahead_prices(
-    days: int = Query(7, ge=1, le=30, description="Aantal dagen historiek + vandaag + morgen"),
+    days: int = Query(1, ge=1, le=365, description="Aantal dagen historiek + vandaag + morgen"),
 ):
     """
     Dag-vooruit elektriciteitsprijzen (ENTSO-E A44) voor België.

@@ -52,40 +52,43 @@ function barColor(p) {
 export default function Prices() {
   const [data,           setData]           = useState([])
   const [days,           setDays]           = useState(1)
+  const [rolling,        setRolling]        = useState(false)
   const [loading,        setLoading]        = useState(true)
   const [error,          setError]          = useState(null)
   const [tomorrowStatus, setTomorrowStatus] = useState(null)
   const [justArrived,    setJustArrived]    = useState(false)
   const prevAvailableRef = useRef(false)
 
+  // Rolling mode gebruikt altijd 3 dagen data (gisteren + vandaag + morgen)
+  const fetchDays = rolling ? 3 : days
+
   // Prijsdata ophalen
   useEffect(() => {
     setLoading(true); setError(null)
-    fetchDayAhead(days)
+    fetchDayAhead(fetchDays)
       .then(r => setData(r.records || []))
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
-  }, [days])
+  }, [fetchDays])
 
-  // D+1 status pollen — elke 2 min
+  // D+1 status pollen — elke 5 min
   useEffect(() => {
     const poll = async () => {
       try {
         const status = await fetchTomorrowStatus()
-        // Prijzen net beschikbaar gekomen → auto-refresh + notificatie
         if (!prevAvailableRef.current && status.available) {
           setJustArrived(true)
           setTimeout(() => setJustArrived(false), 15_000)
-          fetchDayAhead(days).then(r => setData(r.records || []))
+          fetchDayAhead(fetchDays).then(r => setData(r.records || []))
         }
         prevAvailableRef.current = status.available
         setTomorrowStatus(status)
-      } catch { /* stille fout — badge toont niets */ }
+      } catch { /* stille fout */ }
     }
     poll()
-    const id = setInterval(poll, 300_000)   // elke 5 min — matcht backend scheduler
+    const id = setInterval(poll, 300_000)
     return () => clearInterval(id)
-  }, [days])
+  }, [fetchDays])
 
   // Overall stats
   const prices   = data.map(p => p.price_eur_mwh ?? 0)
@@ -176,6 +179,23 @@ export default function Prices() {
     return ts >= todayStart2 && ts < tomorrowStart
   })
   const todayDate = format(new Date(), 'dd/MM/yyyy')
+
+  // Nu-indicator: afronden op 15 min voor x-as matching
+  const _nowRaw   = new Date()
+  const _nowRound = new Date(_nowRaw.getFullYear(), _nowRaw.getMonth(), _nowRaw.getDate(),
+                             _nowRaw.getHours(), Math.floor(_nowRaw.getMinutes() / 15) * 15)
+  const nowSlot1d      = format(_nowRound, 'HH:mm')
+  const nowSlotRolling = format(_nowRound, 'dd/MM HH:mm')
+
+  // Rolling horizon: 48u-venster (12u terug t.e.m. 36u vooruit)
+  const rollingWindowStart = new Date(_nowRaw.getTime() - 12 * 3_600_000)
+  const rollingWindowEnd   = new Date(_nowRaw.getTime() + 36 * 3_600_000)
+  const rollingChartData   = data
+    .filter(d => { const ts = new Date(d.timestamp); return ts >= rollingWindowStart && ts <= rollingWindowEnd })
+    .map(d => ({
+      ts:    format(parseISO(d.timestamp), 'dd/MM HH:mm'),
+      price: parseFloat((d.price_eur_mwh ?? 0).toFixed(2)),
+    }))
 
   // Gecombineerde 1d-data: vandaag + morgen op zelfde tijdas
   const combinedChartData = todayRecords.map((d, i) => ({
@@ -340,36 +360,68 @@ export default function Prices() {
 
       {/* ── Prijsverloop ── */}
       <div className="card">
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:16 }}>
           <div>
             <div className="card-title" style={{ margin:0 }}>
-              {days === 1 ? `⚡ Vandaag — ${todayDate}` : 'Historisch prijsverloop'}
+              {rolling     ? '↻ Rolling horizon — 48u venster'
+               : days === 1 ? `⚡ Vandaag — ${todayDate}`
+               :              'Historisch prijsverloop'}
             </div>
-            {days === 1 && hasTomorrow && (
+            {rolling && (
+              <div style={{ fontSize:12, color:'var(--muted)', marginTop:3 }}>
+                12u verleden · <span style={{ color:'#f59e0b' }}>▶ Nu</span> · 36u toekomst — verschuift mee met de klok
+              </div>
+            )}
+            {!rolling && days === 1 && hasTomorrow && (
               <div style={{ fontSize:12, color:'var(--muted)', marginTop:3 }}>
                 <span style={{ color:'#f59e0b', marginRight:4 }}>●</span>
                 Morgen — {d1Date} (overlay ter vergelijking)
               </div>
             )}
           </div>
-          <div style={{ display:'flex', gap:8 }}>
-            {[1,3,7,14,30].map(d => (
-              <button key={d} onClick={() => setDays(d)} className="btn" style={{
-                padding:'4px 12px', fontSize:12,
-                background: days===d ? 'rgba(59,130,246,0.2)' : 'transparent',
-                border:`1px solid ${days===d ? '#3b82f6' : '#2a2d3e'}`,
-                color: days===d ? '#3b82f6' : '#8892a4', borderRadius:6,
-              }}>
-                {d}d
-              </button>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6, justifyContent:'flex-end', maxWidth:340 }}>
+            {[
+              { v:1, l:'1d' }, { v:3, l:'3d' }, { v:7, l:'7d' }, { v:14, l:'14d' },
+              { v:30, l:'30d' }, { v:90, l:'90d' }, { v:180, l:'180d' }, { v:365, l:'1j' },
+            ].map(({ v, l }) => (
+              <button key={v} onClick={() => { setDays(v); setRolling(false) }} className="btn" style={{
+                padding:'4px 10px', fontSize:11,
+                background: !rolling && days===v ? 'rgba(59,130,246,0.2)' : 'transparent',
+                border:`1px solid ${!rolling && days===v ? '#3b82f6' : 'var(--border)'}`,
+                color: !rolling && days===v ? '#3b82f6' : 'var(--muted)', borderRadius:6,
+              }}>{l}</button>
             ))}
+            <button onClick={() => setRolling(r => !r)} className="btn" style={{
+              padding:'4px 10px', fontSize:11,
+              background: rolling ? 'rgba(249,115,22,0.2)' : 'transparent',
+              border:`1px solid ${rolling ? '#f97316' : 'var(--border)'}`,
+              color: rolling ? '#f97316' : 'var(--muted)', borderRadius:6,
+            }}>↻ 48u</button>
           </div>
         </div>
         {loading && <div className="loading">Data ophalen…</div>}
         {error   && <div className="error">⚠️ {error}</div>}
         {!loading && !error && (
           <ResponsiveContainer width="100%" height={320}>
-            {days === 1 ? (
+            {rolling ? (
+              <AreaChart data={rollingChartData} margin={{ top:4, right:8, bottom:0, left:0 }}>
+                <defs>
+                  <linearGradient id="rollingGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+                <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:10 }} interval={7}/>
+                <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" €"/>
+                <Tooltip content={<PriceTip/>}/>
+                <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 4"/>
+                <ReferenceLine x={nowSlotRolling} stroke="#f97316" strokeWidth={2}
+                  label={{ value:'▶ Nu', position:'insideTopRight', fill:'#f97316', fontSize:11, fontWeight:700 }}/>
+                <Area type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={2}
+                  fill="url(#rollingGrad)" dot={false}/>
+              </AreaChart>
+            ) : days === 1 ? (
               <AreaChart data={combinedChartData} margin={{ top:4, right:8, bottom:0, left:0 }}>
                 <defs>
                   <linearGradient id="todayGrad" x1="0" y1="0" x2="0" y2="1">
@@ -386,6 +438,8 @@ export default function Prices() {
                 <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" €"/>
                 <Tooltip content={<CombinedTip/>}/>
                 <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 4"/>
+                <ReferenceLine x={nowSlot1d} stroke="#f97316" strokeWidth={2}
+                  label={{ value:'▶ Nu', position:'insideTopRight', fill:'#f97316', fontSize:11, fontWeight:700 }}/>
                 <Area type="monotone" dataKey="vandaag" name="Vandaag"
                   stroke="#3b82f6" strokeWidth={2} fill="url(#todayGrad)" dot={false}/>
                 {hasTomorrow && (
