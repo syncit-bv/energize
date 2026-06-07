@@ -54,6 +54,8 @@ Recharts SVG kan geen CSS vars → gebruik concrete hex: `rgba(100,116,139,0.25)
 | 16 | CSV-export optimalisatieschema | 629a511 |
 | 14 | D+1 intelligentiepanel op Prijzen-pagina | 629a511 |
 | 20 | Rule-based simulatie + MILP vergelijking | 5c22d02 + 45bae79 |
+| 24 | D+1 prijssignaal — auto-detectie + frontend badge | 95bef41 + a57fbb8 |
+| 25 | 1d default + D+1 overlay op prijsgrafiek | (huidig) |
 
 ## Openstaande features
 | # | Feature | Omschrijving |

@@ -22,6 +22,25 @@ const PriceTip = ({ active, payload, label }) => {
   )
 }
 
+const CombinedTip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null
+  const colors = { vandaag:'#3b82f6', morgen:'#f59e0b' }
+  const names  = { vandaag:'Vandaag', morgen:'Morgen' }
+  return (
+    <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:8, padding:'10px 14px', minWidth:160 }}>
+      <div style={{ color:'var(--muted)', fontSize:12, marginBottom:6 }}>{label}</div>
+      {payload.map(p => p.value != null && (
+        <div key={p.dataKey} style={{ display:'flex', justifyContent:'space-between', gap:16,
+          color: p.value < 0 ? '#ef4444' : colors[p.dataKey] ?? 'var(--text)',
+          fontWeight:600, fontSize:14, marginBottom:2 }}>
+          <span style={{ color:'var(--muted)', fontWeight:400 }}>{names[p.dataKey]}</span>
+          {p.value.toFixed(2)} €/MWh
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function barColor(p) {
   if (p < 0)   return '#ef4444'
   if (p < 40)  return '#22c55e'
@@ -32,7 +51,7 @@ function barColor(p) {
 
 export default function Prices() {
   const [data,           setData]           = useState([])
-  const [days,           setDays]           = useState(7)
+  const [days,           setDays]           = useState(1)
   const [loading,        setLoading]        = useState(true)
   const [error,          setError]          = useState(null)
   const [tomorrowStatus, setTomorrowStatus] = useState(null)
@@ -148,6 +167,23 @@ export default function Prices() {
   const d1ChartData = d1Records.map(d => ({
     ts:    fmtH(d.timestamp),
     price: parseFloat((d.price_eur_mwh ?? 0).toFixed(2)),
+  }))
+
+  // Vandaag's records (voor 1d gecombineerde grafiek)
+  const todayStart2   = startOfDay(new Date())
+  const todayRecords  = data.filter(d => {
+    const ts = new Date(d.timestamp)
+    return ts >= todayStart2 && ts < tomorrowStart
+  })
+  const todayDate = format(new Date(), 'dd/MM/yyyy')
+
+  // Gecombineerde 1d-data: vandaag + morgen op zelfde tijdas
+  const combinedChartData = todayRecords.map((d, i) => ({
+    ts:      fmtH(d.timestamp),
+    vandaag: parseFloat((d.price_eur_mwh ?? 0).toFixed(2)),
+    morgen:  d1Records[i] != null
+               ? parseFloat((d1Records[i].price_eur_mwh ?? 0).toFixed(2))
+               : undefined,
   }))
 
   return (
@@ -302,10 +338,20 @@ export default function Prices() {
         </div>
       )}
 
-      {/* ── Historisch prijsverloop ── */}
+      {/* ── Prijsverloop ── */}
       <div className="card">
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-          <div className="card-title" style={{ margin:0 }}>Historisch prijsverloop</div>
+          <div>
+            <div className="card-title" style={{ margin:0 }}>
+              {days === 1 ? `⚡ Vandaag — ${todayDate}` : 'Historisch prijsverloop'}
+            </div>
+            {days === 1 && hasTomorrow && (
+              <div style={{ fontSize:12, color:'var(--muted)', marginTop:3 }}>
+                <span style={{ color:'#f59e0b', marginRight:4 }}>●</span>
+                Morgen — {d1Date} (overlay ter vergelijking)
+              </div>
+            )}
+          </div>
           <div style={{ display:'flex', gap:8 }}>
             {[1,3,7,14,30].map(d => (
               <button key={d} onClick={() => setDays(d)} className="btn" style={{
@@ -323,21 +369,48 @@ export default function Prices() {
         {error   && <div className="error">⚠️ {error}</div>}
         {!loading && !error && (
           <ResponsiveContainer width="100%" height={320}>
-            <AreaChart data={chartData} margin={{ top:4, right:8, bottom:0, left:0 }}>
-              <defs>
-                <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.3}/>
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
-              <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:11 }} interval="preserveStartEnd"/>
-              <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" €"/>
-              <Tooltip content={<PriceTip/>}/>
-              <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 4"/>
-              <Area type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={2}
-                fill="url(#priceGrad)" dot={false}/>
-            </AreaChart>
+            {days === 1 ? (
+              <AreaChart data={combinedChartData} margin={{ top:4, right:8, bottom:0, left:0 }}>
+                <defs>
+                  <linearGradient id="todayGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                  <linearGradient id="morgenGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#f59e0b" stopOpacity={0.22}/>
+                    <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+                <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:11 }} interval={7}/>
+                <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" €"/>
+                <Tooltip content={<CombinedTip/>}/>
+                <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 4"/>
+                <Area type="monotone" dataKey="vandaag" name="Vandaag"
+                  stroke="#3b82f6" strokeWidth={2} fill="url(#todayGrad)" dot={false}/>
+                {hasTomorrow && (
+                  <Area type="monotone" dataKey="morgen" name="Morgen"
+                    stroke="#f59e0b" strokeWidth={2} fill="url(#morgenGrad)"
+                    dot={false} strokeDasharray="5 3"/>
+                )}
+              </AreaChart>
+            ) : (
+              <AreaChart data={chartData} margin={{ top:4, right:8, bottom:0, left:0 }}>
+                <defs>
+                  <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+                <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:11 }} interval="preserveStartEnd"/>
+                <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" €"/>
+                <Tooltip content={<PriceTip/>}/>
+                <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 4"/>
+                <Area type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={2}
+                  fill="url(#priceGrad)" dot={false}/>
+              </AreaChart>
+            )}
           </ResponsiveContainer>
         )}
       </div>
