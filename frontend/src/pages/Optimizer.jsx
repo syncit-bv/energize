@@ -409,7 +409,6 @@ export default function Optimizer() {
   const [battKwh,     setBattKwh]     = useState(10)
   const [initSoc,     setInitSoc]     = useState(0.50)
   const [minSoc,      setMinSoc]      = useState(0.10)
-  const [endSoc,      setEndSoc]      = useState(0.20)
   const [eff,         setEff]         = useState(0.92)
   const [horizonDays, setHorizonDays] = useState(1)
   const [dischPow,    setDischPow]    = useState(5.0)
