@@ -3,7 +3,7 @@ import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ComposedChart,
 } from 'recharts'
-import { runOptimization, pollJob, fetchDayAhead, fetchYesterdaySoc, fetchBatterySizing } from '../api'
+import { runOptimization, pollJob, fetchDayAhead, fetchYesterdaySoc, startBatterySizing } from '../api'
 
 const POLL_INTERVAL   = 2000
 const CAP_EUR_KW_YEAR = 60   // Fluvius capaciteitstarief €/kW/jaar
@@ -278,23 +278,51 @@ export default function Optimizer() {
       .finally(() => setYesterdaySocLoading(false))
   }, [])
 
-  // Feature #30: Battery Sizing Advisor
-  const [sizingResult,  setSizingResult]  = useState(null)
-  const [sizingLoading, setSizingLoading] = useState(false)
-  const [sizingError,   setSizingError]   = useState(null)
+  // Feature #30/#31: Battery Sizing Advisor — polling-gebaseerde voortgang
+  const [sizingResult,   setSizingResult]   = useState(null)
+  const [sizingLoading,  setSizingLoading]  = useState(false)
+  const [sizingError,    setSizingError]    = useState(null)
+  const [sizingProgress, setSizingProgress] = useState(0)      // 0–100
+  const [sizingMessage,  setSizingMessage]  = useState('')     // label per grootte
+  const sizingPollRef = useRef(null)
+
+  const stopSizingPoll = () => {
+    if (sizingPollRef.current) { clearInterval(sizingPollRef.current); sizingPollRef.current = null }
+  }
 
   const handleSizingAnalyse = async () => {
+    stopSizingPoll()
     setSizingLoading(true); setSizingError(null); setSizingResult(null)
+    setSizingProgress(0); setSizingMessage('⬇️ ENTSO-E data ophalen…')
     try {
-      const data = await fetchBatterySizing({
+      const { job_id } = await startBatterySizing({
         power_kw:   conn.maxInjectie,
         efficiency: eff,
         days:       365,
       })
-      setSizingResult(data)   // bevat { results, days_analyzed, start_date, end_date, ... }
+      // Start polling elke 3 s
+      sizingPollRef.current = setInterval(async () => {
+        try {
+          const j = await pollJob(job_id)
+          setSizingProgress(j.progress ?? 0)
+          if (j.message) setSizingMessage(j.message)
+          if (j.status === 'completed') {
+            stopSizingPoll()
+            setSizingResult(j.result)
+            setSizingLoading(false)
+          } else if (j.status === 'failed') {
+            stopSizingPoll()
+            setSizingError(j.error || 'Berekening mislukt.')
+            setSizingLoading(false)
+          }
+        } catch (e) {
+          stopSizingPoll()
+          setSizingError(e.message)
+          setSizingLoading(false)
+        }
+      }, 3000)
     } catch (e) {
       setSizingError(e.response?.data?.detail || e.message)
-    } finally {
       setSizingLoading(false)
     }
   }
@@ -1133,8 +1161,26 @@ export default function Optimizer() {
             )}
 
             {sizingLoading && (
-              <div className="loading" style={{ marginBottom: 8 }}>
-                MILP draait voor 7 groottes over 365 dagen — dit duurt enkele minuten…
+              <div style={{ marginBottom: 12 }}>
+                {/* Label */}
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+                  {sizingMessage || '⏳ Bezig…'}
+                </div>
+                {/* Progress bar */}
+                <div style={{
+                  background: 'var(--border)', borderRadius: 6, height: 8, overflow: 'hidden',
+                }}>
+                  <div style={{
+                    width: `${sizingProgress}%`,
+                    background: 'var(--accent)',
+                    height: '100%',
+                    borderRadius: 6,
+                    transition: 'width 0.4s ease',
+                  }}/>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--muted2)', marginTop: 4 }}>
+                  {sizingProgress}% voltooid — eerste run duurt enkele minuten; volgende klik is instant (cache)
+                </div>
               </div>
             )}
 

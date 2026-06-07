@@ -24,6 +24,7 @@ class JobResponse(BaseModel):
     job_id: str
     status: JobStatus
     progress: int = 0
+    message: Optional[str] = None   # Voortgangslabel, bv. "Berekening 3/7: 20 kWh…"
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
