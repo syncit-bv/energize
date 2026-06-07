@@ -2,12 +2,53 @@ import { useState, useEffect, useRef } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { runOptimization, pollJob, fetchDayAhead } from '../api'
 
-const POLL_INTERVAL = 2000
+const POLL_INTERVAL  = 2000
 const CAP_EUR_KW_YEAR = 60   // Fluvius capaciteitstarief €/kW/jaar
 
 const CONN = {
   mono: { label: 'Monofase', sub: '1×230V', maxAfname: 9.2,  maxInjectie: 5.0  },
   drie: { label: 'Driefasig', sub: '3×230V', maxAfname: 15.9, maxInjectie: 10.0 },
+}
+
+// Belgisch gesimplificeerd zonprofiel (kW per kwartier-slot)
+// Schaal-factor per maand: rekening houdend met dag-lengte + bewolking BE
+const SOLAR_PEAK_FRAC = [0.15, 0.25, 0.38, 0.50, 0.58, 0.62, 0.60, 0.55, 0.40, 0.27, 0.16, 0.12]
+
+function generateSolarProfile(slots, kWp) {
+  if (kWp <= 0) return null
+  const now     = new Date()
+  const month   = now.getMonth()
+  const peakFrac = SOLAR_PEAK_FRAC[month]
+  // Dag-lengte (uren): 8h in dec, 16h in jun
+  const dayLen  = 12 + 4 * Math.sin((month - 2) * Math.PI / 6)
+  const halfDay = dayLen / 2
+  // Zonnemiddag ≈ 12:00 UTC (winter) / 11:00 UTC (zomer, DST)
+  const isDST        = now.getTimezoneOffset() < -60
+  const solarNoonUTC = isDST ? 11 : 12
+  const PR = 0.78   // performance ratio
+
+  const profile = []
+  for (let i = 0; i < slots; i++) {
+    const t        = new Date(now.getTime() + i * 15 * 60 * 1000)
+    const hUTC     = t.getUTCHours() + t.getUTCMinutes() / 60
+    const fromNoon = hUTC - solarNoonUTC
+    if (Math.abs(fromNoon) >= halfDay) {
+      profile.push(0)
+    } else {
+      const irr = Math.cos((Math.PI / 2) * fromNoon / halfDay)  // 1 op middag, 0 bij op/onder
+      profile.push(Math.max(0, kWp * irr * peakFrac * PR))
+    }
+  }
+  return profile
+}
+
+function estimateDailyKwh(kWp) {
+  if (kWp <= 0) return 0
+  const month   = new Date().getMonth()
+  const peakFrac = SOLAR_PEAK_FRAC[month]
+  const dayLen  = 12 + 4 * Math.sin((month - 2) * Math.PI / 6)
+  // Oppervlakte onder cosinuscurve = 2/π × dayLen × peakFrac × PR × kWp
+  return kWp * peakFrac * 0.78 * dayLen * (2 / Math.PI)
 }
 
 // ── Stijlhulpers ──────────────────────────────────────────────────────────────
@@ -51,11 +92,46 @@ const ChartTip = ({ active, payload, label }) => {
   )
 }
 
+// ── CSV export (Belgisch formaat: ; + komma decimaal) ──────────────────────────
+function exportCSV(schedule, summary) {
+  const comma = (n, d=3) => (n ?? 0).toFixed(d).replace('.', ',')
+  const header = ['Tijdstip','Prijs (€/MWh)','Laden (kWh)','Ontladen (kWh)','Netto laden grid (kWh)',
+                  'Netto laden solar (kWh)','SoC (kWh)','SoC (%)','Netto P&L (€)'].join(';')
+  const rows = schedule.map(h => [
+    h.datetime,
+    comma(h.price_eur_mwh, 2),
+    comma(h.charge_kwh),
+    comma(h.discharge_kwh),
+    comma(h.charge_grid_kwh),
+    comma(h.charge_solar_kwh),
+    comma(h.soc_kwh),
+    comma(h.soc_pct, 1),
+    comma(h.net_revenue_eur, 4),
+  ].join(';'))
+  // Samenvatting onderaan
+  rows.push('')
+  rows.push('Samenvatting')
+  rows.push(`Netto opbrengst (na cap.tarief);${comma(summary.total_net_revenue_eur, 4)}`)
+  rows.push(`Arbitrage bruto;${comma(summary.revenue_execute_eur, 4)}`)
+  rows.push(`Cap.tarief periode;${comma(summary.cap_tarief_period_eur, 2)}`)
+  rows.push(`Piek afname;${comma(summary.peak_charge_kw, 2)} kW`)
+  rows.push(`Eind-SOC;${comma(summary.final_soc_pct, 1)}%`)
+
+  const csv  = [header, ...rows].join('\r\n')
+  const blob = new Blob(['﻿' + csv], { type:'text/csv;charset=utf-8' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `fluxy-schema-${new Date().toISOString().slice(0,10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 // ── Specs berekeningen ────────────────────────────────────────────────────────
 function calcSpecs(battKwh, chargePow, dischargePow, minSoc, efficiency) {
-  const eta   = Math.sqrt(efficiency)
-  const slCh  = chargePow   * 0.25
-  const slDis = dischargePow * 0.25
+  const eta      = Math.sqrt(efficiency)
+  const slCh     = chargePow   * 0.25
+  const slDis    = dischargePow * 0.25
   const cRateCh  = (eta * slCh  * 4) / battKwh
   const cRateDis = (slDis / eta * 4) / battKwh
   const usable   = battKwh * (1 - minSoc)
@@ -66,10 +142,10 @@ function calcSpecs(battKwh, chargePow, dischargePow, minSoc, efficiency) {
 }
 
 function calcCap(dischargePow) {
-  const peak     = Math.max(2.5, dischargePow)
-  const monthly  = peak * CAP_EUR_KW_YEAR / 12
-  const forfait  = 2.5  * CAP_EUR_KW_YEAR / 12
-  const extra    = monthly - forfait
+  const peak    = Math.max(2.5, dischargePow)
+  const monthly = peak * CAP_EUR_KW_YEAR / 12
+  const forfait = 2.5  * CAP_EUR_KW_YEAR / 12
+  const extra   = monthly - forfait
   return { peak, monthly, forfait, extra }
 }
 
@@ -83,11 +159,12 @@ export default function Optimizer() {
   const [eff,      setEff]      = useState(0.92)
   const [horizon,  setHorizon]  = useState(24)
   const [dischPow, setDischPow] = useState(5.0)
+  const [solarKwp, setSolarKwp] = useState(0)    // 0 = geen solar
   const [jobId,    setJobId]    = useState(null)
   const [job,      setJob]      = useState(null)
   const [submitting, setSub]    = useState(false)
   const [error,    setError]    = useState(null)
-  const [priceInfo, setPriceInfo] = useState(null)   // { count, slots }
+  const [priceInfo, setPriceInfo] = useState(null)
   const pollRef = useRef(null)
 
   const conn  = CONN[aansluiting]
@@ -117,10 +194,9 @@ export default function Optimizer() {
     e.preventDefault()
     setError(null); setJob(null); setSub(true); setPriceInfo(null)
     try {
-      // Stap 1: day-ahead prijzen ophalen (vandaag + morgen indien beschikbaar)
+      // Stap 1: day-ahead prijzen ophalen
       const pricesData = await fetchDayAhead(2)
-      const nowMs = Date.now()
-      // Huidige 15-min slot (afgerond naar beneden)
+      const nowMs  = Date.now()
       const slotMs = Math.floor(nowMs / (15 * 60 * 1000)) * 15 * 60 * 1000
       const priceFloats = pricesData.records
         .filter(r => new Date(r.timestamp).getTime() >= slotMs)
@@ -130,13 +206,16 @@ export default function Optimizer() {
       if (priceFloats.length < 4) {
         throw new Error(
           `Onvoldoende prijsdata: ${priceFloats.length} slots beschikbaar (min. 4). ` +
-          'Controleer of ENTSO-E API key correct is ingesteld.'
+          'Controleer of de ENTSO-E API key correct is ingesteld.'
         )
       }
       setPriceInfo({ slots: priceFloats.length, hours: (priceFloats.length / 4).toFixed(1) })
 
-      // Stap 2: optimalisatie starten
-      const res = await runOptimization({
+      // Stap 2: solar forecast genereren (optioneel)
+      const solarForecast = generateSolarProfile(priceFloats.length, solarKwp)
+
+      // Stap 3: optimalisatie starten
+      const payload = {
         prices:             priceFloats,
         battery_kwh:        battKwh,
         efficiency:         eff,
@@ -145,7 +224,9 @@ export default function Optimizer() {
         min_end_soc:        endSoc,
         discharge_power_kw: dischPow,
         charge_power_kw:    conn.maxAfname,
-      })
+        ...(solarForecast ? { solar_forecast: solarForecast } : {}),
+      }
+      const res = await runOptimization(payload)
       setJobId(res.job_id)
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
@@ -158,27 +239,31 @@ export default function Optimizer() {
   const summary  = result?.summary || {}
   const schedule = result?.schedule || []
 
-  // Aggregeer 15-min slots naar uren voor de grafiek
+  // Aggregeer 15-min → uren voor grafiek
   const chartData = Array.from(
     { length: Math.ceil(schedule.length / 4) },
-    (_, hourIdx) => {
-      const slots = schedule.slice(hourIdx * 4, (hourIdx + 1) * 4)
+    (_, h) => {
+      const slots = schedule.slice(h * 4, (h + 1) * 4)
       return {
-        hour:      hourIdx,
-        charge:    slots.reduce((s, h) => s + (h.charge_kwh    > 0 ? h.charge_kwh    : 0), 0),
-        discharge: slots.reduce((s, h) => s + (h.discharge_kwh > 0 ? h.discharge_kwh : 0), 0),
+        hour:      h,
+        charge:    slots.reduce((s, r) => s + (r.charge_kwh    > 0 ? r.charge_kwh    : 0), 0),
+        discharge: slots.reduce((s, r) => s + (r.discharge_kwh > 0 ? r.discharge_kwh : 0), 0),
       }
     }
   )
 
-  // ── C-rate kleur ─────────────────────────────────────────────────────────
   const cColor = (c) => c > 2 ? '#ef4444' : c > 1 ? '#f59e0b' : '#22c55e'
+  const hasSolar = solarKwp > 0
+  const estKwh   = estimateDailyKwh(solarKwp)
 
   return (
     <div>
       <div className="page-header">
         <div className="page-title">🔋 MILP Optimizer</div>
-        <div className="page-sub">Batterij dispatch optimalisatie via PuLP + HiGHS solver</div>
+        <div className="page-sub">
+          Batterij dispatch optimalisatie via PuLP + HiGHS solver
+          {hasSolar && <span style={{ color:'#f59e0b', marginLeft:8 }}>· ☀️ MILP+Solar actief</span>}
+        </div>
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:'340px 1fr', gap:24, alignItems:'start' }}>
@@ -209,13 +294,13 @@ export default function Optimizer() {
             </div>
             <div style={{ marginTop:10, display:'grid', gridTemplateColumns:'1fr 1fr', gap:6 }}>
               {[
-                ['Afname van net', conn.maxAfname,   'kW', '#3b82f6', 'Laadlimiet MILP'],
+                ['Afname van net',  conn.maxAfname,   'kW', '#3b82f6', 'Laadlimiet MILP'],
                 ['Injectie op net', conn.maxInjectie, 'kW', '#22c55e', 'Ontlaadlimiet'],
               ].map(([lbl, val, unit, clr, sub]) => (
                 <div key={lbl} style={{ background:'rgba(255,255,255,0.03)', borderRadius:8,
                   padding:'10px 12px', border:'1px solid rgba(255,255,255,0.06)' }}>
                   <div style={{ color:'#6b7280', fontSize:11 }}>{lbl}</div>
-                  <div style={{ color: clr, fontSize:18, fontWeight:700, marginTop:2 }}>
+                  <div style={{ color:clr, fontSize:18, fontWeight:700, marginTop:2 }}>
                     {val} <span style={{ fontSize:12 }}>{unit}</span>
                   </div>
                   <div style={{ color:'#374151', fontSize:10, marginTop:2 }}>{sub}</div>
@@ -256,6 +341,24 @@ export default function Optimizer() {
             <Slider label="Min reserve"  value={minSoc}  min={0}    max={0.40} step={0.05} onChange={setMinSoc}  fmt={v=>`${(v*100).toFixed(0)}%`}/>
             <Slider label="Min eind-SOC" value={endSoc}  min={0.05} max={0.50} step={0.05} onChange={setEndSoc}  fmt={v=>`${(v*100).toFixed(0)}%`}/>
 
+            {/* ── Zonneenergie (optioneel) ── */}
+            {sec('Zonne-energie (optioneel)')}
+            <Slider label="PV-vermogen (kWp)" value={solarKwp}
+              min={0} max={20} step={0.5}
+              onChange={setSolarKwp} fmt={v => v === 0 ? 'Uit' : `${v.toFixed(1)} kWp`}/>
+            {hasSolar && (
+              <div style={{ background:'rgba(245,158,11,0.08)', border:'1px solid rgba(245,158,11,0.2)',
+                borderRadius:7, padding:'8px 12px', fontSize:12, color:'#f59e0b', marginBottom:4 }}>
+                ☀️ Geschatte dagopbrengst: <strong>~{estKwh.toFixed(1)} kWh/dag</strong>
+                <span style={{ color:'#374151', marginLeft:6 }}>→ MILP+Solar actief</span>
+              </div>
+            )}
+            {!hasSolar && (
+              <div style={{ color:'#374151', fontSize:11, marginBottom:4 }}>
+                0 kWp = geen solar → MILP basis arbitrage
+              </div>
+            )}
+
             {/* ── Horizon ── */}
             {sec('Horizon')}
             <div className="form-row" style={{ marginBottom:8 }}>
@@ -279,7 +382,7 @@ export default function Optimizer() {
                 ? '📡 Prijzen laden…'
                 : job?.status === 'running'
                 ? '⚙️ Bezig…'
-                : '▶ Optimaliseer'}
+                : hasSolar ? '▶ Optimaliseer + Solar' : '▶ Optimaliseer'}
             </button>
           </form>
         </div>
@@ -287,7 +390,7 @@ export default function Optimizer() {
         {/* ════════════════ RECHTS: specs + resultaten ════════════════ */}
         <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
 
-          {/* ── Batterij Specs & Validatie (altijd zichtbaar) ── */}
+          {/* ── Batterij Specs & Validatie ── */}
           <div className="card" style={{ padding:'20px 22px' }}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
               <div className="card-title" style={{ margin:0 }}>🔬 Batterij Specs & Validatie</div>
@@ -303,7 +406,7 @@ export default function Optimizer() {
                 <div key={lbl} style={{ background:'rgba(255,255,255,0.03)', borderRadius:8,
                   padding:'12px 10px', textAlign:'center', border:'1px solid rgba(255,255,255,0.05)' }}>
                   <div style={{ color:'#6b7280', fontSize:11, marginBottom:6 }}>{lbl}</div>
-                  <div style={{ color: clr, fontSize:18, fontWeight:700 }}>{val}</div>
+                  <div style={{ color:clr, fontSize:18, fontWeight:700 }}>{val}</div>
                 </div>
               ))}
             </div>
@@ -333,15 +436,15 @@ export default function Optimizer() {
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10 }}>
               {[
-                ['Maandelijkse kost',    `€${cap.monthly.toFixed(2)}`, '#e2e8f0'],
-                ['Forfait minimum',      `€${cap.forfait.toFixed(2)}`,  '#6b7280'],
-                ['Extra boven forfait',  cap.extra > 0.01 ? `+€${cap.extra.toFixed(2)}` : '= forfait',
-                                         cap.extra > 0.01 ? '#f59e0b' : '#22c55e'],
+                ['Maandelijkse kost',   `€${cap.monthly.toFixed(2)}`, '#e2e8f0'],
+                ['Forfait minimum',     `€${cap.forfait.toFixed(2)}`,  '#6b7280'],
+                ['Extra boven forfait', cap.extra > 0.01 ? `+€${cap.extra.toFixed(2)}` : '= forfait',
+                                        cap.extra > 0.01 ? '#f59e0b' : '#22c55e'],
               ].map(([lbl, val, clr]) => (
                 <div key={lbl} style={{ background:'rgba(255,255,255,0.03)', borderRadius:8,
                   padding:'12px', border:'1px solid rgba(255,255,255,0.05)' }}>
                   <div style={{ color:'#6b7280', fontSize:11, marginBottom:4 }}>{lbl}</div>
-                  <div style={{ color: clr, fontSize:16, fontWeight:700 }}>{val}</div>
+                  <div style={{ color:clr, fontSize:16, fontWeight:700 }}>{val}</div>
                 </div>
               ))}
             </div>
@@ -359,6 +462,9 @@ export default function Optimizer() {
               <span>📡</span>
               <span>
                 <strong>{priceInfo.slots} slots</strong> geladen ({priceInfo.hours} uur) van ENTSO-E
+                {hasSolar && <span style={{ color:'#f59e0b', marginLeft:8 }}>
+                  · ☀️ Solar forecast {solarKwp} kWp meegestuurd
+                </span>}
               </span>
             </div>
           )}
@@ -374,9 +480,7 @@ export default function Optimizer() {
                 <div className="loading" style={{ marginTop:10 }}>HiGHS solver bezig…</div>
               )}
               {job.status === 'failed' && job.error && (
-                <div style={{ marginTop:8, color:'#ef4444', fontSize:13 }}>
-                  {job.error}
-                </div>
+                <div style={{ marginTop:8, color:'#ef4444', fontSize:13 }}>{job.error}</div>
               )}
             </div>
           )}
@@ -384,13 +488,13 @@ export default function Optimizer() {
           {/* ── Resultaten ── */}
           {result && (
             <>
-              {/* KPI's op basis van echte summary velden */}
+              {/* KPI's */}
               <div className="kpi-grid">
                 {[
-                  ['Netto opbrengst',      `€${(summary.total_net_revenue_eur ?? 0).toFixed(3)}`, 'na cap.tarief', 'positive'],
-                  ['Arbitrage (bruto)',    `€${(summary.revenue_execute_eur   ?? 0).toFixed(3)}`, 'voor cap.tarief','neutral'],
-                  ['Cap.tarief periode',  `€${(summary.cap_tarief_period_eur  ?? 0).toFixed(2)}`, `${(summary.peak_charge_kw ?? 0).toFixed(1)} kW piek`, 'negative'],
-                  ['Eind-SOC',            `${(summary.final_soc_pct ?? 0).toFixed(1)}%`,          `${summary.solve_time_sec ?? '?'}s solver`, 'neutral'],
+                  ['Netto opbrengst',    `€${(summary.total_net_revenue_eur ?? 0).toFixed(3)}`, 'na cap.tarief',  'positive'],
+                  ['Arbitrage (bruto)',  `€${(summary.revenue_execute_eur   ?? 0).toFixed(3)}`, 'voor cap.tarief','neutral'],
+                  ['Cap.tarief periode', `€${(summary.cap_tarief_period_eur  ?? 0).toFixed(2)}`,`${(summary.peak_charge_kw ?? 0).toFixed(1)} kW piek`, 'negative'],
+                  ['Eind-SOC',          `${(summary.final_soc_pct ?? 0).toFixed(1)}%`,          `${summary.solve_time_sec ?? '?'}s solver`, 'neutral'],
                 ].map(([lbl, val, sub, cls]) => (
                   <div key={lbl} className="kpi">
                     <div className="kpi-label">{lbl}</div>
@@ -400,10 +504,24 @@ export default function Optimizer() {
                 ))}
               </div>
 
-              {/* Dispatch grafiek — geaggregeerd per uur */}
+              {/* Export knop */}
+              <div style={{ display:'flex', justifyContent:'flex-end' }}>
+                <button onClick={() => exportCSV(schedule, summary)} className="btn" style={{
+                  padding:'7px 16px', fontSize:13,
+                  border:'1px solid #2a2d3e', color:'#8892a4', borderRadius:7,
+                  display:'flex', alignItems:'center', gap:6,
+                }}>
+                  📥 Exporteer CSV (Belgisch formaat)
+                </button>
+              </div>
+
+              {/* Dispatch grafiek */}
               {chartData.length > 0 && (
                 <div className="card">
-                  <div className="card-title">Dispatch Schema (per uur)</div>
+                  <div className="card-title">
+                    Dispatch Schema (per uur)
+                    {result.label && <span style={{ color:'#4b5563', fontWeight:400, marginLeft:8, fontSize:12 }}>{result.label}</span>}
+                  </div>
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={chartData} margin={{ top:4, right:8, bottom:0, left:0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3e"/>
