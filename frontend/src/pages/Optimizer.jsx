@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import {
   BarChart, Bar, LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ComposedChart,
+  ReferenceLine,
 } from 'recharts'
 import { runOptimization, pollJob, fetchDayAhead, fetchYesterdaySoc, startBatterySizing } from '../api'
 
@@ -255,7 +256,7 @@ export default function Optimizer() {
   const [minSoc,      setMinSoc]      = useState(0.10)
   const [endSoc,      setEndSoc]      = useState(0.20)
   const [eff,         setEff]         = useState(0.92)
-  const [horizon,     setHorizon]     = useState(24)
+  const [horizonDays, setHorizonDays] = useState(1)
   const [dischPow,    setDischPow]    = useState(5.0)
   const [solarKwp,    setSolarKwp]    = useState(0)
 
@@ -362,12 +363,12 @@ export default function Optimizer() {
     e.preventDefault()
     setError(null); setJob(null); setSub(true); setPriceInfo(null)
     try {
-      const pricesData  = await fetchDayAhead(2)
+      const pricesData  = await fetchDayAhead(horizonDays + 1)
       const nowMs       = Date.now()
       const slotMs      = Math.floor(nowMs / (15 * 60 * 1000)) * 15 * 60 * 1000
       const priceFloats = pricesData.records
         .filter(r => new Date(r.timestamp).getTime() >= slotMs)
-        .slice(0, horizon * 4)
+        .slice(0, horizonDays * 96)
         .map(r => r.price_eur_mwh)
 
       if (priceFloats.length < 4) {
@@ -637,16 +638,50 @@ export default function Optimizer() {
             )}
 
             {/* ── Horizon ── */}
-            {sec('Horizon')}
-            <div className="form-row" style={{ marginBottom: 8 }}>
-              <label style={{ color: 'var(--muted)', fontSize: 13 }}>Tijdshorizon (uur)</label>
-              <input type="number" min={1} max={48} step={1} value={horizon}
-                onChange={e => setHorizon(parseInt(e.target.value))}
-                className="form-input"/>
+            {sec('Tijdshorizon')}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6,
+              background: 'var(--bg)', borderRadius: 10, padding: 4, marginBottom: 8,
+            }}>
+              {[
+                { d: 1, label: '1 dag',   sub: '96 slots' },
+                { d: 2, label: '2 dagen', sub: '192 slots' },
+                { d: 3, label: '3 dagen', sub: '288 slots' },
+              ].map(({ d, label, sub }) => {
+                const on = horizonDays === d
+                return (
+                  <button key={d} type="button" onClick={() => setHorizonDays(d)} style={{
+                    padding: '9px 8px', borderRadius: 8,
+                    border:     on ? '1px solid rgba(59,130,246,0.5)' : '1px solid transparent',
+                    background: on ? 'rgba(59,130,246,0.12)' : 'transparent',
+                    color:      on ? '#60a5fa' : 'var(--muted)',
+                    cursor: 'pointer', fontWeight: on ? 600 : 400, fontSize: 13, transition: 'all 0.15s',
+                    textAlign: 'center',
+                  }}>
+                    <div>{label}</div>
+                    <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>{sub}</div>
+                  </button>
+                )
+              })}
             </div>
-            <div style={{ color: 'var(--muted2)', fontSize: 11, marginBottom: 8 }}>
-              = {horizon * 4} kwartier-slots · prijzen worden live opgehaald
-            </div>
+            {horizonDays === 1 ? (
+              <div style={{ color: 'var(--muted2)', fontSize: 11, marginBottom: 8 }}>
+                MILP optimaliseert de komende 24 uur in 1 solver-run.
+              </div>
+            ) : (
+              <div style={{
+                background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.18)',
+                borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
+              }}>
+                🧩 <strong>Rolling horizon:</strong> MILP ziet {horizonDays * 24}h prijzen tegelijk
+                en optimaliseert over de volledige periode in 1 run.{' '}
+                {horizonDays >= 2 && (
+                  <span style={{ color: 'var(--muted2)' }}>
+                    Vereist D+{horizonDays - 1} ENTSO-E prijzen (beschikbaar ~13:00 CET).
+                  </span>
+                )}
+              </div>
+            )}
 
             {error && <div className="error" style={{ marginTop: 8 }}>⚠️ {error}</div>}
 
@@ -657,7 +692,9 @@ export default function Optimizer() {
                 ? '📡 Prijzen laden…'
                 : job?.status === 'running'
                 ? '⚙️ Bezig…'
-                : hasSolar ? '▶ Optimaliseer + Solar' : '▶ Optimaliseer'}
+                : hasSolar
+                  ? `▶ Optimaliseer ${horizonDays > 1 ? horizonDays + 'd ' : ''}+ Solar`
+                  : `▶ Optimaliseer${horizonDays > 1 ? ' ' + horizonDays + ' dagen' : ''}`}
             </button>
           </form>
         </div>
@@ -821,7 +858,7 @@ export default function Optimizer() {
             }}>
               <span>📡</span>
               <span>
-                <strong>{priceInfo.slots} slots</strong> geladen ({priceInfo.hours} uur) van ENTSO-E
+                <strong>{priceInfo.slots} slots</strong> geladen ({priceInfo.hours} uur · {horizonDays} dag{horizonDays > 1 ? 'en' : ''}) van ENTSO-E
                 {hasSolar && <span style={{ color: '#f59e0b', marginLeft: 8 }}>· ☀️ Solar forecast {solarKwp} kWp meegestuurd</span>}
               </span>
             </div>
@@ -1017,6 +1054,10 @@ export default function Optimizer() {
                             <Line type="monotone" dataKey="rbSoc" name="Regelgebaseerd" stroke="#a855f7"
                               strokeWidth={2} dot={false} strokeDasharray="5 3"/>
                           )}
+                          {[24, 48].map(h => compChartData.some(d => d.hour >= h) && (
+                            <ReferenceLine key={h} x={h} stroke="#64748b" strokeDasharray="4 3"
+                              strokeOpacity={0.5}/>
+                          ))}
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
@@ -1037,6 +1078,10 @@ export default function Optimizer() {
                             <Line type="monotone" dataKey="rbRev" name="Regelgebaseerd" stroke="#a855f7"
                               strokeWidth={2} dot={false} strokeDasharray="5 3"/>
                           )}
+                          {[24, 48].map(h => compChartData.some(d => d.hour >= h) && (
+                            <ReferenceLine key={h} x={h} stroke="#64748b" strokeDasharray="4 3"
+                              strokeOpacity={0.5}/>
+                          ))}
                         </LineChart>
                       </ResponsiveContainer>
                     </div>
@@ -1059,6 +1104,50 @@ export default function Optimizer() {
                   </div>
                 ))}
               </div>
+
+              {/* ── Per-dag opbrengst breakdown (multi-dag) ── */}
+              {schedule.length > 96 && (() => {
+                const numDays = Math.ceil(schedule.length / 96)
+                return (
+                  <div className="card" style={{ padding: '16px 20px' }}>
+                    <div style={{ color: 'var(--muted)', fontSize: 11, fontWeight: 600,
+                      textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
+                      📅 Opbrengst per dag
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${numDays}, 1fr)`, gap: 8 }}>
+                      {Array.from({ length: numDays }, (_, d) => {
+                        const daySlots   = schedule.slice(d * 96, (d + 1) * 96)
+                        const dayGross   = daySlots.reduce((s, r) => s + (r.net_revenue_eur ?? 0), 0)
+                        const dayDate    = new Date(Date.now() + d * 86_400_000)
+                        const dayLabel   = dayDate.toLocaleDateString('nl-BE', {
+                          weekday: 'short', day: 'numeric', month: 'short',
+                        })
+                        const chSlots    = daySlots.filter(r => r.charge_kwh    > 0.001).length
+                        const disSlots   = daySlots.filter(r => r.discharge_kwh > 0.001).length
+                        return (
+                          <div key={d} style={{
+                            background: 'var(--bg)', borderRadius: 8,
+                            padding: '12px 14px', border: '1px solid var(--border)', textAlign: 'center',
+                          }}>
+                            <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
+                              Dag {d + 1} — {dayLabel}
+                            </div>
+                            <div style={{
+                              color: dayGross >= 0 ? '#22c55e' : '#ef4444',
+                              fontSize: 18, fontWeight: 700,
+                            }}>
+                              €{dayGross.toFixed(3)}
+                            </div>
+                            <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 4 }}>
+                              🔵 {chSlots} laden · 🟢 {disSlots} ontladen
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })()}
 
               {/* Export */}
               <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -1091,6 +1180,13 @@ export default function Optimizer() {
                       <Legend wrapperStyle={{ color: '#64748b', fontSize: 11 }}/>
                       <Bar dataKey="charge"    name="Laden"    fill="#3b82f6" radius={[2, 2, 0, 0]}/>
                       <Bar dataKey="discharge" name="Ontladen" fill="#22c55e" radius={[2, 2, 0, 0]}/>
+                      {/* Dagscheidingslijnen */}
+                      {[24, 48].map(h => chartData.some(d => d.hour >= h) && (
+                        <ReferenceLine key={h} x={h} stroke="#64748b" strokeDasharray="4 3"
+                          strokeOpacity={0.6}
+                          label={{ value: `Dag ${h / 24 + 1}`, position: 'top',
+                            fill: '#64748b', fontSize: 10 }}/>
+                      ))}
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
