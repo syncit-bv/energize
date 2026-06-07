@@ -546,7 +546,16 @@ export default function Optimizer() {
       // Alle horizonten zijn backward-looking: 1d = vandaag, 2d = vandaag + gisteren, etc.
       const fetchDays   = Math.min(horizonDays + 1, 366)   // +1 buffer zodat vandaag altijd inzit
       const pricesData  = await fetchDayAhead(fetchDays)
-      const priceFloats = pricesData.records
+
+      // Bij backtesting (horizonDays > 1): sluit D+1 (morgen) uit — enkel vandaag + verleden.
+      // D+1 is al gepubliceerd maar hoort niet in een historische backtest.
+      // Bij 1d planning: D+1 gewenst voor day-ahead lookahead.
+      const endOfToday  = new Date(); endOfToday.setHours(23, 59, 59, 999)
+      const baseRecords = horizonDays > 1
+        ? pricesData.records.filter(r => new Date(r.timestamp) <= endOfToday)
+        : pricesData.records
+
+      const priceFloats = baseRecords
         .slice(-horizonDays * 96)
         .map(r => r.price_eur_mwh)
 
