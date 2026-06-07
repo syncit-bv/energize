@@ -63,6 +63,8 @@ Recharts SVG kan geen CSS vars → gebruik concrete hex: `rgba(100,116,139,0.25)
 | 31 | Battery Sizing: volledig jaar ENTSO-E + annualisering | 9d5b643 |
 | 32 | Elia extra tabbladen: live 5-min onbalans + prognose vs realisatie | be68840 |
 | 33 | Fix Elia Zon&Wind + Prognose tabs: timezone UTC→Brussels + ODS v2.1 paginering (max 100/req) | fb6c691 |
+| 34 | MILP horizon uitgebreid: 7/14/30/90/180/365d backtesting via historische ENTSO-E prijzen | 6f009f3 |
+| 35 | 4-scenario vergelijking (MILP basis/+Solar, Regel/+Solar) + backtesting CSV export + solver iteraties weergave | 635cb20 |
 
 ## Openstaande features
 | # | Feature | Omschrijving |
