@@ -53,7 +53,8 @@ function estimateDailyKwh(kWp) {
 // ── Rule-based simulatie (pure frontend, geen API) ────────────────────────────
 // Logica: laden wanneer prijs < laaddrempel, ontladen wanneer prijs > ontlaaddrempel.
 // Bij negatieve prijzen wordt altijd maximaal geladen (gratis/betaald energie).
-function simulateRuleBased(prices, thresholds, config) {
+// solarForecast (optioneel): array van kW per 15-min slot — solar laadt batterij gratis vóór netlogica.
+function simulateRuleBased(prices, thresholds, config, solarForecast = null) {
   const { chargeThreshold, dischargeThreshold } = thresholds
   const { battKwh, initSoc, minSoc, efficiency, chargePow, dischargePow } = config
   // Round-trip efficiency: sqrt voor symmetrische laad/ontlaad verliezen
@@ -67,7 +68,16 @@ function simulateRuleBased(prices, thresholds, config) {
   for (let i = 0; i < prices.length; i++) {
     const price = prices[i]
 
-    // Maximaal laadbare energie vanuit het net dit kwartier
+    // Solar laadt batterij eerst (gratis — geen netkost)
+    let solarChargeKwh = 0
+    if (solarForecast && solarForecast[i] > 0) {
+      const solarKwh15    = solarForecast[i] * 0.25          // kW → kWh/kwartier
+      const maxFromSolar  = Math.min(solarKwh15, chargePow * 0.25, (battKwh - socKwh) / eta)
+      solarChargeKwh      = Math.max(0, maxFromSolar)
+      socKwh              = Math.min(battKwh, socKwh + solarChargeKwh * eta)
+    }
+
+    // Maximaal laadbare energie vanuit het net dit kwartier (na solar)
     const maxChargeGrid    = Math.max(0, Math.min(chargePow * 0.25, (battKwh - socKwh) / eta))
     // Maximaal ontlaadbare energie naar het net dit kwartier
     const maxDischargeGrid = Math.max(0, Math.min(dischargePow * 0.25, (socKwh - minSocKwh) * eta))
@@ -79,10 +89,10 @@ function simulateRuleBased(prices, thresholds, config) {
       // Negatieve prijs: altijd maximaal laden (we worden betaald om energie af te nemen)
       chargeKwh = maxChargeGrid
     } else if (price <= chargeThreshold && maxChargeGrid > 0.001) {
-      // Goedkope prijs: laden
+      // Goedkope prijs: laden vanuit net
       chargeKwh = maxChargeGrid
     } else if (price >= dischargeThreshold && maxDischargeGrid > 0.001) {
-      // Dure prijs: ontladen
+      // Dure prijs: ontladen naar net
       dischargeKwh = maxDischargeGrid
     }
 
@@ -93,25 +103,25 @@ function simulateRuleBased(prices, thresholds, config) {
       socKwh = Math.max(minSocKwh, socKwh - dischargeKwh / eta)
     }
 
-    // Netto P&L per slot:
-    // laden = kosten (negatief), maar bij negatieve prijs: we worden betaald = positief
-    // ontladen = opbrengst (positief bij positieve prijs)
+    // Netto P&L: alleen netkosten/-baten tellen (solar is gratis)
     const netRev = (dischargeKwh - chargeKwh) * price / 1000
 
     schedule.push({
       slot: i,
-      price_eur_mwh:   price,
-      charge_kwh:      chargeKwh,
-      discharge_kwh:   dischargeKwh,
-      soc_kwh:         socKwh,
-      soc_pct:         (socKwh / battKwh) * 100,
-      net_revenue_eur: netRev,
+      price_eur_mwh:    price,
+      charge_kwh:       chargeKwh,
+      charge_solar_kwh: solarChargeKwh,
+      discharge_kwh:    dischargeKwh,
+      soc_kwh:          socKwh,
+      soc_pct:          (socKwh / battKwh) * 100,
+      net_revenue_eur:  netRev,
     })
   }
 
-  const totalChargeKwh    = schedule.reduce((s, r) => s + r.charge_kwh,    0)
-  const totalDischargeKwh = schedule.reduce((s, r) => s + r.discharge_kwh, 0)
-  const grossRevenue      = schedule.reduce((s, r) => s + r.net_revenue_eur, 0)
+  const totalChargeKwh    = schedule.reduce((s, r) => s + r.charge_kwh,      0)
+  const totalDischargeKwh = schedule.reduce((s, r) => s + r.discharge_kwh,   0)
+  const totalSolarKwh     = schedule.reduce((s, r) => s + r.charge_solar_kwh, 0)
+  const grossRevenue      = schedule.reduce((s, r) => s + r.net_revenue_eur,  0)
 
   return {
     schedule,
@@ -122,6 +132,7 @@ function simulateRuleBased(prices, thresholds, config) {
       discharge_events:    schedule.filter(s => s.discharge_kwh > 0.001).length,
       total_charge_kwh:    totalChargeKwh,
       total_discharge_kwh: totalDischargeKwh,
+      total_solar_kwh:     totalSolarKwh,
       partial_cycles:      totalDischargeKwh / battKwh,
     },
   }
@@ -190,6 +201,135 @@ const makeTip = (unitStr, decimals) => ({ active, payload, label }) => {
 }
 const SocTip = makeTip('%', 1)
 const RevTip = makeTip(' €', 4)
+
+// ── Backtesting rapport CSV (dagelijks overzicht + 4-scenario vergelijking) ──
+function exportBacktestCSV(horizonDays, milpBase, milpSolar, rbBase, rbSolar, prices) {
+  const comma = (n, d = 3) => (n ?? 0).toFixed(d).replace('.', ',')
+
+  // Dagelijks aggregaat berekenen voor elke strategie
+  const aggregateByDay = (schedule) => {
+    if (!schedule?.length) return []
+    const days = {}
+    for (const slot of schedule) {
+      const date = (slot.datetime || '').slice(0, 10)
+      if (!date) continue
+      if (!days[date]) days[date] = { revenue: 0, charge: 0, discharge: 0, solar: 0 }
+      days[date].revenue   += slot.net_revenue_eur   ?? 0
+      days[date].charge    += slot.charge_kwh        ?? 0
+      days[date].discharge += slot.discharge_kwh     ?? 0
+      days[date].solar     += (slot.charge_solar_kwh ?? 0)
+    }
+    return days
+  }
+
+  const daysMilpBase  = aggregateByDay(milpBase?.schedule)
+  const daysMilpSolar = aggregateByDay(milpSolar?.schedule)
+  const avgPrice      = prices?.length
+    ? prices.reduce((s, p) => s + p, 0) / prices.length
+    : 0
+
+  // Bereken rb-dagdata via prijs-index (geen datetime in rb-schedule)
+  const rbDailyRevenue = (schedule) => {
+    if (!schedule?.length) return {}
+    const slotsPerDay = 96
+    const totDays = Math.ceil(schedule.length / slotsPerDay)
+    const result = {}
+    for (let d = 0; d < totDays; d++) {
+      const key = `dag ${d + 1}`
+      const sls = schedule.slice(d * slotsPerDay, (d + 1) * slotsPerDay)
+      result[key] = {
+        revenue:   sls.reduce((s, r) => s + (r.net_revenue_eur ?? 0), 0),
+        charge:    sls.reduce((s, r) => s + (r.charge_kwh ?? 0), 0),
+        discharge: sls.reduce((s, r) => s + (r.discharge_kwh ?? 0), 0),
+        solar:     sls.reduce((s, r) => s + (r.charge_solar_kwh ?? 0), 0),
+      }
+    }
+    return result
+  }
+
+  const rbBase_days  = rbDailyRevenue(rbBase?.schedule)
+  const rbSolar_days = rbDailyRevenue(rbSolar?.schedule)
+
+  const hasSolar = !!(milpSolar && rbSolar)
+
+  // Header
+  const cols = hasSolar
+    ? ['Datum/Dag','MILP basis rev (€)','MILP+Solar rev (€)','Rule-based rev (€)','Rule-based+Solar rev (€)']
+    : ['Datum/Dag','MILP rev (€)','Rule-based rev (€)']
+
+  const rows = [cols.join(';')]
+
+  // Dagdata ophalen via MILP-datetimes (meest betrouwbaar) of rb-index
+  const allDates = Object.keys(daysMilpBase || daysMilpSolar || {})
+  if (allDates.length) {
+    for (const date of allDates.sort()) {
+      const bm  = daysMilpBase[date]
+      const sm  = hasSolar ? daysMilpSolar[date] : null
+      // Voor rb: day index afleiden uit volgorde
+      const idx = allDates.sort().indexOf(date)
+      const key = `dag ${idx + 1}`
+      const br  = rbBase_days[key]
+      const sr  = hasSolar ? rbSolar_days[key] : null
+      rows.push(hasSolar
+        ? [date, comma(bm?.revenue,4), comma(sm?.revenue,4), comma(br?.revenue,4), comma(sr?.revenue,4)].join(';')
+        : [date, comma(bm?.revenue,4), comma(br?.revenue,4)].join(';')
+      )
+    }
+  } else {
+    // Alleen rule-based dagen (geen MILP-datetime)
+    for (const key of Object.keys(rbBase_days).sort()) {
+      const br = rbBase_days[key]
+      const sr = hasSolar ? rbSolar_days[key] : null
+      rows.push(hasSolar
+        ? [key, '', '', comma(br?.revenue,4), comma(sr?.revenue,4)].join(';')
+        : [key, '', comma(br?.revenue,4)].join(';')
+      )
+    }
+  }
+
+  // Totaalrij
+  rows.push('')
+  rows.push('TOTAAL')
+  const totMilpBase  = milpBase  ? (milpBase.summary?.revenue_execute_eur  ?? milpBase.summary?.gross_revenue_eur  ?? 0) : null
+  const totMilpSolar = milpSolar ? (milpSolar.summary?.revenue_execute_eur ?? milpSolar.summary?.gross_revenue_eur ?? 0) : null
+  const totRbBase    = rbBase    ? rbBase.summary.gross_revenue_eur    : null
+  const totRbSolar   = rbSolar   ? rbSolar.summary.gross_revenue_eur   : null
+
+  rows.push(hasSolar
+    ? ['Netto arbitrage', comma(totMilpBase,4), comma(totMilpSolar,4), comma(totRbBase,4), comma(totRbSolar,4)].join(';')
+    : ['Netto arbitrage', comma(totMilpBase,4), comma(totRbBase,4)].join(';')
+  )
+  rows.push(`Periode (dagen);${horizonDays}`)
+  rows.push(`Gemiddelde ENTSO-E prijs;${comma(avgPrice, 2)} €/MWh`)
+
+  if (hasSolar) {
+    rows.push('')
+    rows.push('Solar (kWh geladen)')
+    rows.push(`MILP+Solar;${comma(milpSolar.summary.charge_solar_kwh ?? 0, 1)}`)
+    rows.push(`Rule-based+Solar;${comma(totRbSolar != null ? rbSolar.summary.total_solar_kwh ?? 0 : 0, 1)}`)
+  }
+
+  // Solver info
+  if (milpBase?.summary?.solve_time_sec != null) {
+    rows.push('')
+    rows.push('Solver info')
+    rows.push(`MILP basis solve-time;${milpBase.summary.solve_time_sec}s`)
+    rows.push(`MILP basis iteraties;${(milpBase.summary.solver_iterations ?? 0).toLocaleString('nl-BE')}`)
+    if (hasSolar) {
+      rows.push(`MILP+Solar solve-time;${milpSolar.summary.solve_time_sec}s`)
+      rows.push(`MILP+Solar iteraties;${(milpSolar.summary.solver_iterations ?? 0).toLocaleString('nl-BE')}`)
+    }
+  }
+
+  const csv  = rows.join('\r\n')
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `fluxy-backtest-${horizonDays}d-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function exportCSV(schedule, summary) {
@@ -260,13 +400,16 @@ export default function Optimizer() {
   const [dischPow,    setDischPow]    = useState(5.0)
   const [solarKwp,    setSolarKwp]    = useState(0)
 
-  // MILP job state
+  // MILP job state — job = MILP+Solar (of basis als kWp=0), jobBase = MILP zonder solar
   const [jobId,      setJobId]     = useState(null)
   const [job,        setJob]       = useState(null)
+  const [jobIdBase,  setJobIdBase] = useState(null)   // second job: MILP basis (geen solar)
+  const [jobBase,    setJobBase]   = useState(null)
   const [submitting, setSub]       = useState(false)
   const [error,      setError]     = useState(null)
   const [priceInfo,  setPriceInfo] = useState(null)
-  const pollRef = useRef(null)
+  const pollRef     = useRef(null)
+  const pollRefBase = useRef(null)
 
   // Feature #22: aanbevolen start-SOC (gisteren's finale SOC via MILP)
   const [yesterdaySoc,        setYesterdaySoc]        = useState(null)
@@ -344,8 +487,10 @@ export default function Optimizer() {
     setDischPow(prev => Math.min(prev, conn.maxInjectie))
   }, [aansluiting])
 
-  // MILP polling
-  const stopPoll = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null } }
+  // MILP polling (job = solar/hoofd, jobBase = basis zonder solar)
+  const stopPoll     = () => { if (pollRef.current)     { clearInterval(pollRef.current);     pollRef.current     = null } }
+  const stopPollBase = () => { if (pollRefBase.current) { clearInterval(pollRefBase.current); pollRefBase.current = null } }
+
   useEffect(() => {
     if (!jobId) return
     stopPoll()
@@ -359,9 +504,23 @@ export default function Optimizer() {
     return stopPoll
   }, [jobId])
 
+  useEffect(() => {
+    if (!jobIdBase) return
+    stopPollBase()
+    pollRefBase.current = setInterval(async () => {
+      try {
+        const j = await pollJob(jobIdBase)
+        setJobBase(j)
+        if (j.status === 'completed' || j.status === 'failed') stopPollBase()
+      } catch (e) { stopPollBase() }
+    }, POLL_INTERVAL)
+    return stopPollBase
+  }, [jobIdBase])
+
   const handleSubmit = async (e) => {
     e.preventDefault()
-    setError(null); setJob(null); setSub(true); setPriceInfo(null)
+    setError(null); setJob(null); setJobBase(null); setSub(true); setPriceInfo(null)
+    setJobId(null); setJobIdBase(null)
     try {
       // Prijzen ophalen: forward-looking (1–3d) vs historisch backtesting (7–365d)
       const fetchDays   = Math.min(horizonDays, 365)
@@ -392,7 +551,8 @@ export default function Optimizer() {
       setLatestPrices(priceFloats)  // ← ook voor rule-based simulatie
 
       const solarForecast = generateSolarProfile(priceFloats.length, solarKwp)
-      const payload = {
+
+      const commonPayload = {
         prices:             priceFloats,
         battery_kwh:        battKwh,
         efficiency:         eff,
@@ -401,10 +561,20 @@ export default function Optimizer() {
         min_end_soc:        endSoc,
         discharge_power_kw: dischPow,
         charge_power_kw:    conn.maxAfname,
-        ...(solarForecast ? { solar_forecast: solarForecast } : {}),
       }
-      const res = await runOptimization(payload)
+
+      // Hoofd-job: met solar als geconfigureerd (of basis als kWp = 0)
+      const res = await runOptimization({
+        ...commonPayload,
+        ...(solarForecast ? { solar_forecast: solarForecast } : {}),
+      })
       setJobId(res.job_id)
+
+      // Tweede job: MILP basis zonder solar (alleen als kWp > 0 voor zinvolle vergelijking)
+      if (solarForecast) {
+        const resBase = await runOptimization(commonPayload)
+        setJobIdBase(resBase.job_id)
+      }
     } catch (err) {
       setError(err.response?.data?.detail || err.message)
     } finally {
@@ -422,9 +592,31 @@ export default function Optimizer() {
     )
   }, [latestPrices, rbChargeThr, rbDischargeThr, battKwh, initSoc, minSoc, eff, conn.maxAfname, dischPow])
 
-  const result   = job?.result
-  const summary  = result?.summary  || {}
-  const schedule = result?.schedule || []
+  // ── Rule-based + Solar (alleen als solarKwp > 0) ──
+  const rbResultSolar = useMemo(() => {
+    if (!latestPrices?.length || solarKwp <= 0) return null
+    const sf = generateSolarProfile(latestPrices.length, solarKwp)
+    return simulateRuleBased(
+      latestPrices,
+      { chargeThreshold: rbChargeThr, dischargeThreshold: rbDischargeThr },
+      { battKwh, initSoc, minSoc, efficiency: eff, chargePow: conn.maxAfname, dischargePow: dischPow },
+      sf,
+    )
+  }, [latestPrices, solarKwp, rbChargeThr, rbDischargeThr, battKwh, initSoc, minSoc, eff, conn.maxAfname, dischPow])
+
+  // Resultaat-aliassen
+  // job     = MILP+Solar (of MILP basis als kWp=0)
+  // jobBase = MILP basis zonder solar (enkel als kWp > 0)
+  const result        = job?.result
+  const resultBase    = jobBase?.result       // MILP zonder solar (kan null zijn)
+  const summary       = result?.summary  || {}
+  const summaryBase   = resultBase?.summary || {}
+  const schedule      = result?.schedule || []
+
+  // Wacht op beide jobs voor vergelijking als er 2 lopen
+  const bothJobsDone  = hasSolar
+    ? (job?.status === 'completed' && (!jobIdBase || jobBase?.status === 'completed'))
+    : (job?.status === 'completed')
 
   // Vergelijkingsgrafiekdata: SOC en cumulatieve opbrengst per uur
   const compChartData = useMemo(() => {
@@ -905,12 +1097,50 @@ export default function Optimizer() {
           {job && (
             <div className="card" style={{ padding: '16px 22px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ color: 'var(--text)', fontWeight: 600 }}>Job {jobId?.slice(0, 8)}…</div>
+                <div style={{ color: 'var(--text)', fontWeight: 600 }}>
+                  {hasSolar ? '☀️ MILP+Solar' : '🧮 MILP'} {jobId?.slice(0, 8)}…
+                </div>
                 <StatusBadge status={job.status}/>
               </div>
-              {job.status === 'running' && <div className="loading" style={{ marginTop: 10 }}>HiGHS solver bezig…</div>}
+              {job.status === 'running' && (
+                <div className="loading" style={{ marginTop: 10 }}>HiGHS solver bezig…</div>
+              )}
+              {job.status === 'completed' && summary.solve_time_sec != null && (
+                <div style={{ marginTop: 8, display: 'flex', gap: 16, fontSize: 12, color: 'var(--muted)' }}>
+                  <span>⏱ {summary.solve_time_sec}s</span>
+                  <span>🔁 {(summary.solver_iterations ?? 0).toLocaleString('nl-BE')} iteraties</span>
+                  <span>📐 {summary.num_slots ?? schedule.length} slots</span>
+                  <span style={{ color: (summary.status ?? '').toLowerCase().includes('optimal') ? '#22c55e' : '#f59e0b' }}>
+                    {summary.status}
+                  </span>
+                </div>
+              )}
               {job.status === 'failed' && job.error && (
                 <div style={{ marginTop: 8, color: '#ef4444', fontSize: 13 }}>{job.error}</div>
+              )}
+            </div>
+          )}
+
+          {/* ── Job status: MILP basis (tweede job) ── */}
+          {jobBase && (
+            <div className="card" style={{ padding: '12px 22px', borderColor: 'rgba(100,116,139,0.3)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ color: 'var(--muted)', fontWeight: 600, fontSize: 13 }}>
+                  🧮 MILP basis {jobIdBase?.slice(0, 8)}…
+                </div>
+                <StatusBadge status={jobBase.status}/>
+              </div>
+              {jobBase.status === 'running' && (
+                <div className="loading" style={{ marginTop: 8, fontSize: 12 }}>HiGHS solver bezig…</div>
+              )}
+              {jobBase.status === 'completed' && summaryBase.solve_time_sec != null && (
+                <div style={{ marginTop: 6, display: 'flex', gap: 16, fontSize: 12, color: 'var(--muted)' }}>
+                  <span>⏱ {summaryBase.solve_time_sec}s</span>
+                  <span>🔁 {(summaryBase.solver_iterations ?? 0).toLocaleString('nl-BE')} iteraties</span>
+                  <span style={{ color: (summaryBase.status ?? '').toLowerCase().includes('optimal') ? '#22c55e' : '#f59e0b' }}>
+                    {summaryBase.status}
+                  </span>
+                </div>
               )}
             </div>
           )}
@@ -949,123 +1179,153 @@ export default function Optimizer() {
           {result && (
             <>
               {/* ── Strategie vergelijking ── */}
-              {rbResult && (
-                <div className="card" style={{
-                  padding: '20px 22px',
-                  border: '1px solid rgba(168,85,247,0.25)',
-                  background: 'rgba(168,85,247,0.02)',
-                }}>
-                  <div className="card-title" style={{ marginBottom: 16 }}>⚖️ Strategie Vergelijking</div>
+              {rbResult && bothJobsDone && (() => {
+                // Bouw een flexibele kolomlijst op basis van beschikbare data
+                const show4 = hasSolar && resultBase && rbResultSolar
+                const cols = show4
+                  ? [
+                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur,      net: null, soc: rbResult.summary.final_soc_pct,    cycles: rbResult.summary.partial_cycles,    solar: null },
+                      { key: 'rbSol', label: '📏+☀️ Regel+Solar',  sub: `${solarKwp} kWp`,                   color: '#f59e0b', rev: rbResultSolar.summary.gross_revenue_eur,  net: null, soc: rbResultSolar.summary.final_soc_pct, cycles: rbResultSolar.summary.partial_cycles, solar: rbResultSolar.summary.total_solar_kwh },
+                      { key: 'milp',  label: '🧮 MILP basis',      sub: 'HiGHS solver',                      color: '#64748b', rev: summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0, net: summaryBase.total_net_revenue_eur, soc: summaryBase.final_soc_pct ?? 0, cycles: null, solar: null },
+                      { key: 'milpS', label: '🧮+☀️ MILP+Solar',  sub: `${solarKwp} kWp`,                   color: '#60a5fa', rev: milpGross ?? 0,                            net: summary.total_net_revenue_eur, soc: summary.final_soc_pct ?? 0,   cycles: null, solar: summary.charge_solar_kwh },
+                    ]
+                  : [
+                      { key: 'milp',  label: '🧮 MILP Optimaal',   sub: 'HiGHS solver',                      color: '#60a5fa', rev: milpGross ?? 0, net: summary.total_net_revenue_eur, soc: summary.final_soc_pct ?? 0, cycles: null, solar: null },
+                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur, net: null, soc: rbResult.summary.final_soc_pct, cycles: rbResult.summary.partial_cycles, solar: null },
+                    ]
 
-                  {/* 3-kolom vergelijkingstabel */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
-                    {/* Header rij */}
-                    <div/>
-                    <div style={{
-                      background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.25)',
-                      borderRadius: 8, padding: '10px 12px', textAlign: 'center',
-                    }}>
-                      <div style={{ color: '#60a5fa', fontWeight: 700, fontSize: 12 }}>🧮 MILP Optimaal</div>
-                      <div style={{ color: 'var(--muted)', fontSize: 10, marginTop: 2 }}>HiGHS solver</div>
-                    </div>
-                    <div style={{
-                      background: 'rgba(168,85,247,0.1)', border: '1px solid rgba(168,85,247,0.25)',
-                      borderRadius: 8, padding: '10px 12px', textAlign: 'center',
-                    }}>
-                      <div style={{ color: '#a855f7', fontWeight: 700, fontSize: 12 }}>📏 Regelgebaseerd</div>
-                      <div style={{ color: 'var(--muted)', fontSize: 10, marginTop: 2 }}>
-                        ≤{rbChargeThr} / ≥{rbDischargeThr} €/MWh
-                      </div>
-                    </div>
+                const maxRev = Math.max(...cols.map(c => c.rev))
+                const colCount = cols.length
 
-                    {/* Arbitrage */}
-                    <div style={{ color: 'var(--muted)', fontSize: 12, display: 'flex', alignItems: 'center' }}>
-                      Arbitrage (bruto)
-                    </div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: '#60a5fa', fontWeight: 700, fontSize: 15 }}>
-                        €{(milpGross ?? 0).toFixed(3)}
-                      </span>
-                    </div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: '#a855f7', fontWeight: 700, fontSize: 15 }}>
-                        €{rbResult.summary.gross_revenue_eur.toFixed(3)}
-                      </span>
-                    </div>
-
-                    {/* Netto opbrengst */}
-                    <div style={{ color: 'var(--muted)', fontSize: 12, display: 'flex', alignItems: 'center' }}>
-                      Netto (na cap.tarief)
-                    </div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{
-                        color: (summary.total_net_revenue_eur ?? 0) >= 0 ? '#22c55e' : '#ef4444',
-                        fontWeight: 700, fontSize: 15,
-                      }}>
-                        €{(summary.total_net_revenue_eur ?? 0).toFixed(3)}
-                      </span>
-                    </div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: 'var(--muted)', fontSize: 11 }}>cap.tarief zelfde</span>
-                    </div>
-
-                    {/* Eind-SOC */}
-                    <div style={{ color: 'var(--muted)', fontSize: 12, display: 'flex', alignItems: 'center' }}>Eind-SOC</div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: 'var(--text)', fontWeight: 600 }}>{(summary.final_soc_pct ?? 0).toFixed(1)}%</span>
-                    </div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: 'var(--text)', fontWeight: 600 }}>{rbResult.summary.final_soc_pct.toFixed(1)}%</span>
-                    </div>
-
-                    {/* Cycli */}
-                    <div style={{ color: 'var(--muted)', fontSize: 12, display: 'flex', alignItems: 'center' }}>Ontlaad-cycli</div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: 'var(--muted)', fontSize: 11 }}>—</span>
-                    </div>
-                    <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 12px', textAlign: 'center', border: '1px solid var(--border)' }}>
-                      <span style={{ color: 'var(--text)', fontWeight: 600 }}>{rbResult.summary.partial_cycles.toFixed(2)}×</span>
-                    </div>
+                const cell = (content) => (
+                  <div style={{ background: 'var(--bg)', borderRadius: 7, padding: '8px 10px', textAlign: 'center', border: '1px solid var(--border)' }}>
+                    {content}
                   </div>
+                )
+                const rowLabel = (txt) => (
+                  <div style={{ color: 'var(--muted)', fontSize: 12, display: 'flex', alignItems: 'center' }}>{txt}</div>
+                )
 
-                  {/* MILP voordeel banner */}
-                  {milpGross != null && (() => {
-                    const diff     = milpGross - rbResult.summary.gross_revenue_eur
-                    const pct      = rbResult.summary.gross_revenue_eur !== 0
-                      ? Math.abs(diff / rbResult.summary.gross_revenue_eur * 100)
-                      : 0
-                    const milpWins = diff >= 0
-                    return (
-                      <div style={{
-                        background: milpWins ? 'rgba(34,197,94,0.08)' : 'rgba(168,85,247,0.08)',
-                        border: `1px solid ${milpWins ? 'rgba(34,197,94,0.25)' : 'rgba(168,85,247,0.25)'}`,
-                        borderRadius: 8, padding: '10px 14px',
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                      }}>
-                        <div>
-                          <div style={{ color: milpWins ? '#22c55e' : '#a855f7', fontWeight: 700, fontSize: 14 }}>
-                            {milpWins ? '🏆 MILP is beter' : '📏 Regelgebaseerd is beter'} met €{Math.abs(diff).toFixed(3)} ({pct.toFixed(1)}%)
+                return (
+                  <div className="card" style={{ padding: '20px 22px', border: '1px solid rgba(168,85,247,0.25)', background: 'rgba(168,85,247,0.02)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                      <div className="card-title" style={{ margin: 0 }}>⚖️ Strategie Vergelijking</div>
+                      {horizonDays >= 7 && (
+                        <button type="button" onClick={() => exportBacktestCSV(
+                          horizonDays,
+                          show4 ? resultBase     : result,
+                          show4 ? result         : null,
+                          rbResult,
+                          show4 ? rbResultSolar  : null,
+                          latestPrices,
+                        )} style={{
+                          background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)',
+                          color: '#22c55e', borderRadius: 7, padding: '6px 12px', fontSize: 12,
+                          cursor: 'pointer', fontWeight: 600,
+                        }}>📊 Exporteer rapport (CSV)</button>
+                      )}
+                    </div>
+
+                    {/* Header + data rijen */}
+                    <div style={{ display: 'grid', gridTemplateColumns: `140px repeat(${colCount}, 1fr)`, gap: 6, marginBottom: 14 }}>
+                      {/* Header */}
+                      <div/>
+                      {cols.map(c => (
+                        <div key={c.key} style={{
+                          background: `rgba(${c.color === '#60a5fa' ? '59,130,246' : c.color === '#a855f7' ? '168,85,247' : c.color === '#f59e0b' ? '245,158,11' : '100,116,139'},0.1)`,
+                          border: `1px solid ${c.color}44`,
+                          borderRadius: 8, padding: '8px 6px', textAlign: 'center',
+                          outline: c.rev === maxRev && c.rev > 0 ? `2px solid ${c.color}` : 'none',
+                        }}>
+                          <div style={{ color: c.color, fontWeight: 700, fontSize: 11 }}>{c.label}</div>
+                          <div style={{ color: 'var(--muted)', fontSize: 9, marginTop: 1 }}>{c.sub}</div>
+                          {c.rev === maxRev && c.rev > 0 && (
+                            <div style={{ color: '#22c55e', fontSize: 9, marginTop: 2, fontWeight: 700 }}>🏆 best</div>
+                          )}
+                        </div>
+                      ))}
+
+                      {/* Arbitrage bruto */}
+                      {rowLabel('Arbitrage (bruto)')}
+                      {cols.map(c => cell(
+                        <span style={{ color: c.color, fontWeight: 700, fontSize: 14 }}>€{c.rev.toFixed(3)}</span>
+                      ))}
+
+                      {/* Netto na cap.tarief */}
+                      {rowLabel('Netto (na cap.tarief)')}
+                      {cols.map(c => cell(
+                        c.net != null
+                          ? <span style={{ color: c.net >= 0 ? '#22c55e' : '#ef4444', fontWeight: 700, fontSize: 13 }}>€{c.net.toFixed(3)}</span>
+                          : <span style={{ color: 'var(--muted)', fontSize: 10 }}>cap.tarief zelfde</span>
+                      ))}
+
+                      {/* Eind-SOC */}
+                      {rowLabel('Eind-SOC')}
+                      {cols.map(c => cell(
+                        <span style={{ color: 'var(--text)', fontWeight: 600, fontSize: 13 }}>{(c.soc ?? 0).toFixed(1)}%</span>
+                      ))}
+
+                      {/* Ontlaad-cycli */}
+                      {rowLabel('Ontlaad-cycli')}
+                      {cols.map(c => cell(
+                        c.cycles != null
+                          ? <span style={{ color: 'var(--text)', fontWeight: 600, fontSize: 13 }}>{c.cycles.toFixed(2)}×</span>
+                          : <span style={{ color: 'var(--muted)', fontSize: 10 }}>—</span>
+                      ))}
+
+                      {/* Solar kWh (alleen als minstens één kolom solar heeft) */}
+                      {cols.some(c => c.solar != null) && <>
+                        {rowLabel('Solar geladen (kWh)')}
+                        {cols.map(c => cell(
+                          c.solar != null
+                            ? <span style={{ color: '#f59e0b', fontWeight: 600, fontSize: 13 }}>{c.solar.toFixed(1)}</span>
+                            : <span style={{ color: 'var(--muted)', fontSize: 10 }}>—</span>
+                        ))}
+                      </>}
+                    </div>
+
+                    {/* Beste vs slechtste banner */}
+                    {(() => {
+                      const best  = cols.reduce((a, b) => a.rev > b.rev ? a : b)
+                      const worst = cols.reduce((a, b) => a.rev < b.rev ? a : b)
+                      if (best.key === worst.key) return null
+                      const gain = best.rev - worst.rev
+                      const pct  = worst.rev !== 0 ? gain / Math.abs(worst.rev) * 100 : 0
+                      return (
+                        <div style={{
+                          background: 'rgba(34,197,94,0.07)', border: '1px solid rgba(34,197,94,0.2)',
+                          borderRadius: 8, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        }}>
+                          <div>
+                            <div style={{ color: '#22c55e', fontWeight: 700, fontSize: 13 }}>
+                              🏆 {best.label} scoort het best — +€{gain.toFixed(3)} ({pct.toFixed(1)}%) vs {worst.label}
+                            </div>
+                            <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>
+                              {show4
+                                ? 'MILP+Solar combineert gratis zonne-energie met globale prijs-optimalisatie.'
+                                : 'MILP vindt de optimale dispatch over de volledige horizon.'}
+                            </div>
                           </div>
-                          <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>
-                            {milpWins
-                              ? 'MILP vindt de optimale volgorde over de hele horizon — regelgebaseerd mist kansen door vaste drempelwaarden.'
-                              : 'De huidige drempelwaarden passen goed bij de prijsverdeling van vandaag — MILP en regelgebaseerd convergeren.'}
+                          <div style={{ color: '#22c55e', fontWeight: 700, fontSize: 20, minWidth: 80, textAlign: 'right', marginLeft: 16 }}>
+                            +€{gain.toFixed(3)}
                           </div>
                         </div>
-                        <div style={{ textAlign: 'right', minWidth: 80, marginLeft: 16 }}>
-                          <div style={{ color: milpWins ? '#22c55e' : '#a855f7', fontWeight: 700, fontSize: 20 }}>
-                            {milpWins ? '+' : '-'}€{Math.abs(diff).toFixed(3)}
-                          </div>
-                          <div style={{ color: 'var(--muted)', fontSize: 11 }}>arbitrage</div>
-                        </div>
-                      </div>
-                    )
-                  })()}
+                      )
+                    })()}
 
-                  <div style={{ color: 'var(--muted2)', fontSize: 11, marginTop: 10 }}>
-                    ℹ️ Capaciteitstarief is identiek voor beide strategieën (zelfde hardware, zelfde piekafname klasse).
-                    {hasSolar && ' Solar PV is enkel in MILP geïntegreerd — regelgebaseerd gebruikt uitsluitend nettarieven.'}
+                    <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 10 }}>
+                      ℹ️ Capaciteitstarief is identiek voor alle strategieën.
+                      {show4 && ' Solar PV: regelgebaseerd laadt batterij via solar als er ruimte is; MILP optimaliseert de volgorde globaal.'}
+                      {horizonDays >= 7 && ' · Klik "Exporteer rapport" voor dagelijks CSV-overzicht.'}
+                    </div>
                   </div>
+                )
+              })()}
+
+              {/* Wachten op tweede MILP-job */}
+              {rbResult && hasSolar && result && !jobBase?.result && jobIdBase && (
+                <div className="card" style={{ padding: '14px 22px', border: '1px solid rgba(100,116,139,0.2)' }}>
+                  <div className="loading" style={{ margin: 0 }}>Wachten op MILP basis-run voor 4-scenario vergelijking…</div>
                 </div>
               )}
 
