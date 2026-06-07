@@ -107,7 +107,16 @@ function TabImbalance({ date }) {
         </ResponsiveContainer>
       )}
       {!loading && !error && chart.length === 0 && (
-        <div className="error">Geen data beschikbaar voor geselecteerde datum</div>
+        <div style={{ background:'rgba(245,158,11,0.08)', border:'1px solid rgba(245,158,11,0.3)',
+          borderRadius:10, padding:'16px 20px', color:'var(--text)' }}>
+          <div style={{ fontWeight:600, marginBottom:6 }}>
+            ⚠️ Geen gevalideerde data voor {date}
+          </div>
+          <div style={{ fontSize:13, color:'var(--muted)', lineHeight:1.6 }}>
+            Dataset ods047 bevat gevalideerde 15-min onbalansdata tot en met <strong>21 mei 2024</strong>.
+            Voor actuele data van vandaag, gebruik de tab <strong>⚡ Live 5-min</strong>.
+          </div>
+        </div>
       )}
     </>
   )
