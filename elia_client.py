@@ -108,11 +108,7 @@ class EliaClient:
         Rolling window van de huidige dag; enkel vandaag en recent beschikbaar.
         """
         where = _date_range_where(target)
-        try:
-            recs = _get("ods161", where, limit=1500)
-        except Exception as exc:
-            logger.warning("Elia ods161 fetch mislukt voor %s: %s", target, exc)
-            return []
+        recs = _get("ods161", where, limit=1500)
 
         rows = []
         for r in recs:
@@ -138,17 +134,8 @@ class EliaClient:
         """
         where = _date_range_where(target)
 
-        try:
-            solar_recs = _get("ods087", where, limit=2000)
-        except Exception as exc:
-            logger.warning("Elia ods087 (solar) mislukt: %s", exc)
-            solar_recs = []
-
-        try:
-            wind_recs = _get("ods086", where, limit=5000)
-        except Exception as exc:
-            logger.warning("Elia ods086 (wind) mislukt: %s", exc)
-            wind_recs = []
+        solar_recs = _get("ods087", where, limit=2000)
+        wind_recs  = _get("ods086", where, limit=5000)
 
         # Aggregeer solar: SUM realtime (fallback mostrecentforecast) per ts
         solar_map: dict[str, float] = {}
@@ -189,11 +176,7 @@ class EliaClient:
         Bron: ods087 — dayaheadforecast vs realtime, SUM per tijdstip.
         """
         where = _date_range_where(target)
-        try:
-            recs = _get("ods087", where, limit=2000)
-        except Exception as exc:
-            logger.warning("Elia ods087 solar forecast mislukt: %s", exc)
-            return []
+        recs = _get("ods087", where, limit=2000)
 
         forecast_map: dict[str, float] = {}
         measured_map: dict[str, float] = {}
@@ -223,11 +206,7 @@ class EliaClient:
         Bron: ods086 — dayaheadforecast vs realtime, SUM per tijdstip per type.
         """
         where = _date_range_where(target)
-        try:
-            recs = _get("ods086", where, limit=5000)
-        except Exception as exc:
-            logger.warning("Elia ods086 wind forecast mislukt: %s", exc)
-            return []
+        recs = _get("ods086", where, limit=5000)
 
         on_fc:  dict[str, float] = {}
         on_me:  dict[str, float] = {}
