@@ -1,4 +1,4 @@
-"""MILP optimalisatie endpoint — POST /api/optimize/run"""
+"""MILP optimalisatie endpoint — POST /api/optimization/run"""
 from __future__ import annotations
 
 import logging
@@ -171,12 +171,12 @@ def _milp_background(job_id: str, req: OptimizeRequest) -> None:
 # POST /api/optimize/run
 # ---------------------------------------------------------------------------
 
-@router.post("/optimize/run", response_model=JobResponse, status_code=202)
+@router.post("/optimization/run", response_model=JobResponse, status_code=202)
 async def run_optimization(req: OptimizeRequest, background_tasks: BackgroundTasks):
     """
     Start een MILP-optimalisatieberekening als achtergrondtaak.
 
-    Geeft onmiddellijk een `job_id` terug. Peil de status en het resultaat via
+    Geeft onmiddellijk een `job_id` terug. Peilen van status en resultaat via
     `GET /api/jobs/{job_id}`.
 
     **Verplicht:**
