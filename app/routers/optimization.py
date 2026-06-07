@@ -1,5 +1,6 @@
 """MILP optimalisatie endpoint — POST /api/optimization/run
-                                  GET  /api/optimization/yesterday-soc"""
+                                  GET  /api/optimization/yesterday-soc
+                                  POST /api/optimization/battery-sizing"""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +13,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
-from app.models.schemas import JobResponse, JobStatus, OptimizeRequest
+from app.models.schemas import (
+    BatterySizingRequest, BatterySizingResponse, BatterySizingResult,
+    JobResponse, JobStatus, OptimizeRequest,
+)
 from app.services.job_manager import job_manager
 
 logger = logging.getLogger(__name__)
@@ -309,3 +313,68 @@ async def get_yesterday_soc():
 
     logger.info("[yesterday-soc] ✅ Finale SOC gisteren: %.1f%% (berekend op %s)", final_soc_pct, now_str)
     return _yesterday_soc_cache
+
+
+# ---------------------------------------------------------------------------
+# POST /api/optimization/battery-sizing
+# ---------------------------------------------------------------------------
+
+@router.post("/optimization/battery-sizing", response_model=BatterySizingResponse)
+async def run_battery_sizing(req: BatterySizingRequest):
+    """
+    Analyseert welke batterijcapaciteit het meest rendabel is voor de opgegeven prijzen.
+    Draait MILP voor elke grootte in `sizes_kwh` en vergelijkt opbrengst en €/kWh.
+
+    Stuurt prijzen via `prices` (dezelfde lijst als /optimization/run).
+    Berekeningsduur: ~1–3 s per grootte (HiGHS MILP).
+    """
+    if len(req.prices) < 4:
+        raise HTTPException(status_code=422, detail="Minimaal 4 prijspunten vereist.")
+    if not req.sizes_kwh:
+        raise HTTPException(status_code=422, detail="Geef minimaal één batterijgrootte op.")
+
+    prices_df = _build_prices_df(req.prices)
+
+    def _run_all_sizes() -> list[BatterySizingResult]:
+        results: list[BatterySizingResult] = []
+        try:
+            import milp_optimizer as mo
+        except ImportError as exc:
+            raise RuntimeError(f"milp_optimizer import mislukt: {exc}")
+
+        for size_kwh in req.sizes_kwh:
+            try:
+                with job_manager.milp_semaphore:
+                    _, summary = mo.optimize_battery_schedule(
+                        prices_df       = prices_df,
+                        battery_kwh     = size_kwh,
+                        max_power_kw    = req.power_kw,
+                        charge_power_kw = req.power_kw,
+                        efficiency      = req.efficiency,
+                        initial_soc     = 0.5,
+                        min_soc         = 0.1,
+                        min_end_soc     = 0.1,
+                    )
+                revenue = float(summary.get("revenue_execute_eur", 0) or 0)
+            except Exception as exc:
+                logger.warning("[sizing] MILP mislukt voor %.1f kWh: %s", size_kwh, exc)
+                revenue = 0.0
+
+            results.append(BatterySizingResult(
+                battery_kwh       = size_kwh,
+                total_revenue_eur = round(revenue, 4),
+                revenue_per_kwh   = round(revenue / size_kwh, 6) if size_kwh > 0 else 0.0,
+            ))
+            logger.debug("[sizing] %.0f kWh → €%.4f (€%.6f/kWh)", size_kwh, revenue, revenue / size_kwh if size_kwh > 0 else 0)
+
+        return results
+
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(None, _run_all_sizes)
+    except Exception as exc:
+        logger.exception("[sizing] Berekening mislukt")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    logger.info("[sizing] ✅ %d groottes berekend voor %d prijsslots", len(results), len(req.prices))
+    return BatterySizingResponse(results=results)

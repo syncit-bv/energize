@@ -35,3 +35,7 @@ export const pollJob = (jobId) =>
 // Feature #22: aanbevolen start-SOC op basis van gisteren's MILP-resultaat
 export const fetchYesterdaySoc = () =>
   api.get('/api/optimization/yesterday-soc').then(r => r.data)
+
+// Feature #30: Battery Sizing Advisor — MILP voor meerdere capaciteiten
+export const fetchBatterySizing = (payload) =>
+  api.post('/api/optimization/battery-sizing', payload).then(r => r.data)
