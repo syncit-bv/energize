@@ -1683,13 +1683,13 @@ export default function Optimizer() {
                           <th>P&L (€)</th>
                         </tr></thead>
                         <tbody>
-                          {schedule.map((h, i) => (
-                            <tr key={i}>
-                              <td style={{ color: 'var(--muted)' }}>{i + 1}</td>
+                          {schedule.map((h, i) => [h, i]).filter(([h]) => (h.charge_kwh || 0) > 0.001 || (h.discharge_kwh || 0) > 0.001).map(([h, origIdx]) => (
+                            <tr key={origIdx}>
+                              <td style={{ color: 'var(--muted)' }}>{origIdx + 1}</td>
                               <td style={{ color: 'var(--muted)', fontSize: 11 }}>
                                 {h.datetime
                                   ? new Date(h.datetime).toLocaleString('nl-BE', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                                  : `Slot ${i + 1}`}
+                                  : `Slot ${origIdx + 1}`}
                               </td>
                               <td style={{ color: h.price_eur_mwh < 0 ? '#ef4444' : h.price_eur_mwh < 50 ? '#22c55e' : 'var(--text)' }}>
                                 {h.price_eur_mwh?.toFixed(2) ?? '—'}
