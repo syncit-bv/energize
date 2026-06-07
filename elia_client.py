@@ -23,19 +23,41 @@ _BRUSSELS = ZoneInfo("Europe/Brussels")
 # ods047 bevat geen data na deze datum
 _ODS047_MAX_DATE = Date(2024, 5, 21)
 
+# Elia ODS v2.1 weigert requests met limit > 100 (400 Bad Request)
+_ODS_MAX_LIMIT = 100
 
-def _get(dataset: str, where: str, limit: int = 500) -> list:
+
+def _get(dataset: str, where: str, limit: int = 100) -> list:
+    """
+    Haalt records op met automatische paginering.
+    Elia ODS v2.1 heeft een harde grens van 100 records per request.
+    Pagineert via offset totdat alle records opgehaald zijn.
+    """
     url = f"{BASE}/{dataset}/records"
-    params = {
-        "where":    where,
-        "limit":    limit,
-        "timezone": "UTC",
-        "order_by": "datetime ASC",
-    }
-    resp = requests.get(url, params=params, timeout=20)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("results", [])
+    all_records: list = []
+    offset = 0
+
+    while True:
+        params = {
+            "where":    where,
+            "limit":    _ODS_MAX_LIMIT,
+            "offset":   offset,
+            "timezone": "UTC",
+            "order_by": "datetime ASC",
+        }
+        resp = requests.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        batch = data.get("results", [])
+        all_records.extend(batch)
+        offset += len(batch)
+        total = data.get("total_count", 0)
+
+        # Stop als we alles hebben of de laatste pagina kleiner was dan de max
+        if len(batch) < _ODS_MAX_LIMIT or offset >= total or offset >= limit:
+            break
+
+    return all_records[:limit]
 
 
 def _f(val, *fallbacks) -> float:
@@ -108,7 +130,7 @@ class EliaClient:
         Rolling window van de huidige dag; enkel vandaag en recent beschikbaar.
         """
         where = _date_range_where(target)
-        recs = _get("ods161", where, limit=1500)
+        recs = _get("ods161", where, limit=1500)  # pagineert automatisch à 100
 
         rows = []
         for r in recs:
@@ -132,10 +154,13 @@ class EliaClient:
           ods086 — wind per regio + offshoreonshore → split + SUM per type (limit=5000)
         Beide datasets zijn live.
         """
-        where = _date_range_where(target)
+        # ods087 solar: region="Belgium" = nationaal totaal → 96 records/dag (1 pagina)
+        # ods086 wind:  geen "Belgium"-regio → som Flanders+Wallonia+Federal → ~480 rec/dag
+        where_solar = _date_range_where(target) + ' AND region = "Belgium"'
+        where_wind  = _date_range_where(target)
 
-        solar_recs = _get("ods087", where, limit=2000)
-        wind_recs  = _get("ods086", where, limit=5000)
+        solar_recs = _get("ods087", where_solar)           # 96 records, 1 pag.
+        wind_recs  = _get("ods086", where_wind, limit=600) # ~480 records, 5 pag.
 
         # Aggregeer solar: SUM realtime (fallback mostrecentforecast) per ts
         solar_map: dict[str, float] = {}
@@ -175,8 +200,8 @@ class EliaClient:
         Velden: timestamp, forecast_mw, measured_mw.
         Bron: ods087 — dayaheadforecast vs realtime, SUM per tijdstip.
         """
-        where = _date_range_where(target)
-        recs = _get("ods087", where, limit=2000)
+        where = _date_range_where(target) + ' AND region = "Belgium"'
+        recs = _get("ods087", where)
 
         forecast_map: dict[str, float] = {}
         measured_map: dict[str, float] = {}
@@ -206,7 +231,7 @@ class EliaClient:
         Bron: ods086 — dayaheadforecast vs realtime, SUM per tijdstip per type.
         """
         where = _date_range_where(target)
-        recs = _get("ods086", where, limit=5000)
+        recs = _get("ods086", where, limit=600)  # ~480 records/dag, 5 pagina's
 
         on_fc:  dict[str, float] = {}
         on_me:  dict[str, float] = {}
