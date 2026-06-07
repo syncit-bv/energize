@@ -10,6 +10,7 @@ pulp>=2.7
 highspy>=1.7
 pyarrow>=14.0
 requests>=2.31
+tzdata>=2024.1
 elia-py>=0.3.1
 entsoe-py>=0.6
 
