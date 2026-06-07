@@ -36,6 +36,6 @@ export const pollJob = (jobId) =>
 export const fetchYesterdaySoc = () =>
   api.get('/api/optimization/yesterday-soc').then(r => r.data)
 
-// Feature #30: Battery Sizing Advisor — MILP voor meerdere capaciteiten
-export const fetchBatterySizing = (payload) =>
-  api.post('/api/optimization/battery-sizing', payload).then(r => r.data)
+// Feature #30/#31: Battery Sizing Advisor — MILP over volledig jaar ENTSO-E data
+export const fetchBatterySizing = ({ power_kw, efficiency, days = 365 }) =>
+  api.get('/api/optimization/battery-sizing', { params: { power_kw, efficiency, days } }).then(r => r.data)

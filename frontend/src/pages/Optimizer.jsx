@@ -284,16 +284,14 @@ export default function Optimizer() {
   const [sizingError,   setSizingError]   = useState(null)
 
   const handleSizingAnalyse = async () => {
-    if (!latestPrices?.length) return
     setSizingLoading(true); setSizingError(null); setSizingResult(null)
     try {
       const data = await fetchBatterySizing({
-        prices:     latestPrices,
         power_kw:   conn.maxInjectie,
         efficiency: eff,
-        sizes_kwh:  [2, 5, 10, 15, 20, 30, 50],
+        days:       365,
       })
-      setSizingResult(data.results)
+      setSizingResult(data)   // bevat { results, days_analyzed, start_date, end_date, ... }
     } catch (e) {
       setSizingError(e.response?.data?.detail || e.message)
     } finally {
@@ -1111,119 +1109,127 @@ export default function Optimizer() {
             </>
           )}
 
-          {/* ── Feature #30: Battery Sizing Advisor ── */}
-          {latestPrices?.length > 0 && (
-            <div className="card" style={{ padding: '20px 22px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <div className="card-title" style={{ margin: 0 }}>🔭 Battery Sizing Advisor</div>
-                <button
-                  type="button"
-                  onClick={handleSizingAnalyse}
-                  disabled={sizingLoading}
-                  className="btn btn-primary"
-                  style={{ padding: '6px 14px', fontSize: 12 }}
-                >
-                  {sizingLoading ? '⚙️ Berekenen…' : '▶ Analyseer'}
-                </button>
+          {/* ── Feature #30/#31: Battery Sizing Advisor ── */}
+          <div className="card" style={{ padding: '20px 22px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div className="card-title" style={{ margin: 0 }}>🔭 Battery Sizing Advisor</div>
+              <button
+                type="button"
+                onClick={handleSizingAnalyse}
+                disabled={sizingLoading}
+                className="btn btn-primary"
+                style={{ padding: '6px 14px', fontSize: 12 }}
+              >
+                {sizingLoading ? '⚙️ Berekenen…' : '▶ Analyseer'}
+              </button>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
+              Vergelijkt meerdere capaciteiten op basis van <strong>1 jaar ENTSO-E dag-ahead prijzen</strong>.
+              Resultaat wordt gecached en hergebruikt gedurende de dag ({conn.maxInjectie} kW · η={eff}).
+            </div>
+
+            {sizingError && (
+              <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {sizingError}</div>
+            )}
+
+            {sizingLoading && (
+              <div className="loading" style={{ marginBottom: 8 }}>
+                MILP draait voor 7 groottes over 365 dagen — dit duurt enkele minuten…
               </div>
-              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
-                Vergelijkt meerdere batterijcapaciteiten op basis van de geladen prijzen
-                ({latestPrices.length} slots · {conn.maxInjectie} kW ontlaadvermogen).
-              </div>
+            )}
 
-              {sizingError && (
-                <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {sizingError}</div>
-              )}
-
-              {sizingLoading && (
-                <div className="loading" style={{ marginBottom: 8 }}>
-                  MILP draait voor 7 groottes — even geduld (~10–20 s)…
-                </div>
-              )}
-
-              {sizingResult && (
+            {sizingResult && (() => {
+              const rows = sizingResult.results ?? []
+              const daysAnalyzed = sizingResult.days_analyzed ?? '?'
+              const startDate    = sizingResult.start_date   ?? ''
+              const endDate      = sizingResult.end_date     ?? ''
+              const bestEffIdx   = rows.reduce((bi, r, i, a) =>
+                (r.annualized_per_kwh ?? r.revenue_per_kwh) > (a[bi].annualized_per_kwh ?? a[bi].revenue_per_kwh) ? i : bi, 0)
+              const bestEff      = rows[bestEffIdx]
+              const current      = rows.find(r => Math.abs(r.battery_kwh - battKwh) < 0.1)
+              return (
                 <>
-                  {/* Staafgrafiek: opbrengst + €/kWh */}
+                  {/* Datumrange label */}
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
+                    📅 Gebaseerd op {daysAnalyzed} dagen ({startDate} → {endDate}) · geannualiseerd naar 1 jaar
+                  </div>
+
+                  {/* Staafgrafiek: jaaropbrengst + €/kWh */}
                   <ResponsiveContainer width="100%" height={220}>
-                    <ComposedChart data={sizingResult} margin={{ top: 4, right: 40, bottom: 0, left: 0 }}>
+                    <ComposedChart data={rows} margin={{ top: 4, right: 48, bottom: 0, left: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
                       <XAxis dataKey="battery_kwh" tick={{ fill: '#64748b', fontSize: 11 }} unit=" kWh"/>
                       <YAxis yAxisId="rev" tick={{ fill: '#64748b', fontSize: 11 }} unit=" €"
-                        label={{ value: '€/dag', angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 10, dy: 30 }}/>
+                        label={{ value: '€/jaar', angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 10, dy: 35 }}/>
                       <YAxis yAxisId="eff" orientation="right" tick={{ fill: '#64748b', fontSize: 11 }}
-                        unit=" €" tickFormatter={v => v.toFixed(4)}
-                        label={{ value: '€/kWh', angle: 90, position: 'insideRight', fill: '#64748b', fontSize: 10, dy: -20 }}/>
+                        tickFormatter={v => `€${v.toFixed(1)}`}
+                        label={{ value: '€/kWh·j', angle: 90, position: 'insideRight', fill: '#64748b', fontSize: 10, dy: -35 }}/>
                       <Tooltip
                         contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
                         labelStyle={{ color: 'var(--text)', fontWeight: 700 }}
-                        labelFormatter={v => `${v} kWh`}
+                        labelFormatter={v => `${v} kWh batterij`}
                         formatter={(val, name) => [
-                          name === 'Opbrengst/dag' ? `€${val.toFixed(4)}` : `€${val.toFixed(5)}/kWh`,
+                          name === 'Opbrengst/jaar'
+                            ? `€${val.toFixed(2)}/jaar`
+                            : `€${val.toFixed(2)}/kWh·jaar`,
                           name,
                         ]}
                       />
                       <Legend wrapperStyle={{ color: '#64748b', fontSize: 11 }}/>
-                      <Bar yAxisId="rev" dataKey="total_revenue_eur" name="Opbrengst/dag"
+                      <Bar yAxisId="rev" dataKey="annualized_revenue_eur" name="Opbrengst/jaar"
                         fill="#3b82f6" radius={[3, 3, 0, 0]}
                         label={{ position: 'top', fill: '#64748b', fontSize: 9,
-                          formatter: v => v > 0 ? `€${v.toFixed(3)}` : '' }}/>
-                      <Line yAxisId="eff" dataKey="revenue_per_kwh" name="€/kWh"
+                          formatter: v => v > 0 ? `€${Math.round(v)}` : '' }}/>
+                      <Line yAxisId="eff" dataKey="annualized_per_kwh" name="€/kWh·jaar"
                         stroke="#f97316" strokeWidth={2} dot={{ fill: '#f97316', r: 4 }} type="monotone"/>
                     </ComposedChart>
                   </ResponsiveContainer>
 
                   {/* Samenvatting: beste ROI + huidige keuze */}
-                  {(() => {
-                    const bestEffIdx = sizingResult.reduce((bi, r, i, a) => r.revenue_per_kwh > a[bi].revenue_per_kwh ? i : bi, 0)
-                    const bestEff    = sizingResult[bestEffIdx]
-                    const current    = sizingResult.find(r => Math.abs(r.battery_kwh - battKwh) < 0.1)
-                    return (
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
-                        <div style={{
-                          background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.25)',
-                          borderRadius: 8, padding: '10px 12px',
-                        }}>
-                          <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
-                            🏆 Beste €/kWh rendement
-                          </div>
-                          <div style={{ color: '#f97316', fontSize: 18, fontWeight: 700 }}>
-                            {bestEff.battery_kwh} kWh
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 10 }}>
+                    <div style={{
+                      background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.25)',
+                      borderRadius: 8, padding: '10px 12px',
+                    }}>
+                      <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
+                        🏆 Beste €/kWh rendement
+                      </div>
+                      <div style={{ color: '#f97316', fontSize: 18, fontWeight: 700 }}>
+                        {bestEff.battery_kwh} kWh
+                      </div>
+                      <div style={{ color: 'var(--muted2)', fontSize: 11, marginTop: 2 }}>
+                        €{bestEff.annualized_revenue_eur?.toFixed(2) ?? '—'}/jaar ·{' '}
+                        €{bestEff.annualized_per_kwh?.toFixed(2) ?? '—'}/kWh·jaar
+                      </div>
+                    </div>
+                    <div style={{
+                      background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.2)',
+                      borderRadius: 8, padding: '10px 12px',
+                    }}>
+                      <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
+                        ⚙️ Huidige instelling
+                      </div>
+                      {current ? (
+                        <>
+                          <div style={{ color: '#60a5fa', fontSize: 18, fontWeight: 700 }}>
+                            {current.battery_kwh} kWh
                           </div>
                           <div style={{ color: 'var(--muted2)', fontSize: 11, marginTop: 2 }}>
-                            €{bestEff.total_revenue_eur.toFixed(4)}/dag ·{' '}
-                            €{bestEff.revenue_per_kwh.toFixed(5)}/kWh
+                            €{current.annualized_revenue_eur?.toFixed(2) ?? '—'}/jaar ·{' '}
+                            €{current.annualized_per_kwh?.toFixed(2) ?? '—'}/kWh·jaar
                           </div>
+                        </>
+                      ) : (
+                        <div style={{ color: 'var(--muted)', fontSize: 13 }}>
+                          {battKwh} kWh (niet in analyseset)
                         </div>
-                        <div style={{
-                          background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.2)',
-                          borderRadius: 8, padding: '10px 12px',
-                        }}>
-                          <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
-                            ⚙️ Huidige instelling
-                          </div>
-                          {current ? (
-                            <>
-                              <div style={{ color: '#60a5fa', fontSize: 18, fontWeight: 700 }}>
-                                {current.battery_kwh} kWh
-                              </div>
-                              <div style={{ color: 'var(--muted2)', fontSize: 11, marginTop: 2 }}>
-                                €{current.total_revenue_eur.toFixed(4)}/dag ·{' '}
-                                €{current.revenue_per_kwh.toFixed(5)}/kWh
-                              </div>
-                            </>
-                          ) : (
-                            <div style={{ color: 'var(--muted)', fontSize: 13 }}>
-                              {battKwh} kWh (niet in analyseset)
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })()}
+                      )}
+                    </div>
+                  </div>
                 </>
-              )}
-            </div>
-          )}
+              )
+            })()}
+          </div>
 
         </div>
       </div>

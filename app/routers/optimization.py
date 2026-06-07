@@ -1,6 +1,6 @@
 """MILP optimalisatie endpoint — POST /api/optimization/run
                                   GET  /api/optimization/yesterday-soc
-                                  POST /api/optimization/battery-sizing"""
+                                  GET  /api/optimization/battery-sizing"""
 from __future__ import annotations
 
 import asyncio
@@ -11,10 +11,9 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, HTTPException
-
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from app.models.schemas import (
-    BatterySizingRequest, BatterySizingResponse, BatterySizingResult,
+    BatterySizingResponse, BatterySizingResult,
     JobResponse, JobStatus, OptimizeRequest,
 )
 from app.services.job_manager import job_manager
@@ -31,6 +30,11 @@ _yesterday_soc_cache: dict = {
     "computed_at":   None,   # ISO-8601 UTC
     "status":        None,   # "ok" of foutmelding
 }
+
+# ---------------------------------------------------------------------------
+# Battery Sizing cache (reset elke dag automatisch; keyed op power_kw + days)
+# ---------------------------------------------------------------------------
+_sizing_cache: dict = {}   # key = (date_str, days, power_kw_rounded) → {"results": [...], "computed_at": ...}
 
 
 def _build_prices_df(prices: List[float]) -> pd.DataFrame:
@@ -316,41 +320,83 @@ async def get_yesterday_soc():
 
 
 # ---------------------------------------------------------------------------
-# POST /api/optimization/battery-sizing
+# GET /api/optimization/battery-sizing
 # ---------------------------------------------------------------------------
 
-@router.post("/optimization/battery-sizing", response_model=BatterySizingResponse)
-async def run_battery_sizing(req: BatterySizingRequest):
+_SIZING_SIZES_KWH = [2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0]
+
+
+@router.get("/optimization/battery-sizing")
+async def run_battery_sizing(
+    days:       int   = Query(365, ge=7,   le=365,  description="Analyseer periode in dagen (max 365)"),
+    power_kw:   float = Query(5.0, gt=0,   le=50,   description="Max ontlaadvermogen in kW"),
+    efficiency: float = Query(0.95, gt=0,  le=1,    description="Round-trip efficiëntie"),
+):
     """
-    Analyseert welke batterijcapaciteit het meest rendabel is voor de opgegeven prijzen.
-    Draait MILP voor elke grootte in `sizes_kwh` en vergelijkt opbrengst en €/kWh.
+    Battery Sizing Advisor — analyseert welke capaciteit het meest rendabel is.
 
-    Stuurt prijzen via `prices` (dezelfde lijst als /optimization/run).
-    Berekeningsduur: ~1–3 s per grootte (HiGHS MILP).
+    Haalt zelf `days` dagen ENTSO-E dag-ahead prijzen op (standaard 365 d = volledig jaar),
+    draait MILP voor elk van de voorgedefinieerde groottes [2, 5, 10, 15, 20, 30, 50 kWh]
+    en geeft opbrengst + €/kWh terug. Resultaat wordt gecached per dag.
+
+    Berekeningsduur: ~2–5 min voor 7 groottes × 365 d op Render Free tier.
     """
-    if len(req.prices) < 4:
-        raise HTTPException(status_code=422, detail="Minimaal 4 prijspunten vereist.")
-    if not req.sizes_kwh:
-        raise HTTPException(status_code=422, detail="Geef minimaal één batterijgrootte op.")
+    today_str    = str(date.today())
+    power_key    = round(power_kw, 1)
+    cache_key    = (today_str, days, power_key, round(efficiency, 3))
 
-    prices_df = _build_prices_df(req.prices)
+    # Gebruik cache als beschikbaar voor vandaag
+    if cache_key in _sizing_cache:
+        logger.debug("[sizing] Cache hit voor %s", cache_key)
+        return _sizing_cache[cache_key]
 
-    def _run_all_sizes() -> list[BatterySizingResult]:
-        results: list[BatterySizingResult] = []
+    # -- Prijzen ophalen van ENTSO-E --
+    api_key = os.getenv("ENTSOE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="ENTSOE_API_KEY niet geconfigureerd.")
+
+    try:
+        from entsoe_client import EntsoeClient
+        start_date = date.today() - timedelta(days=days - 1)
+        end_date   = date.today() + timedelta(days=1)
+        client = EntsoeClient(api_key=api_key)
+        df = client.get_day_ahead_prices(start=start_date, end=end_date)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("[sizing] ENTSO-E fetch mislukt: %s", exc)
+        raise HTTPException(status_code=502, detail=f"ENTSO-E fetch mislukt: {exc}")
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail="Geen prijsdata beschikbaar voor de gevraagde periode.")
+
+    # Bouw prices_df met echte timestamps (niet nep-vandaag-00:00)
+    prices_df = df[["datetime", "price_eur_mwh"]].copy()
+    actual_days  = max(1, len(prices_df) / 96)   # 96 kwartier-slots per dag
+    annualize    = 365.0 / actual_days
+
+    logger.info(
+        "[sizing] %d slots geladen (≈%.0f dagen) voor %d groottes · power=%.1f kW",
+        len(prices_df), actual_days, len(_SIZING_SIZES_KWH), power_kw,
+    )
+
+    # -- MILP per grootte in threadpool --
+    def _run_all_sizes() -> list[dict]:
+        results: list[dict] = []
         try:
             import milp_optimizer as mo
         except ImportError as exc:
             raise RuntimeError(f"milp_optimizer import mislukt: {exc}")
 
-        for size_kwh in req.sizes_kwh:
+        for size_kwh in _SIZING_SIZES_KWH:
             try:
                 with job_manager.milp_semaphore:
                     _, summary = mo.optimize_battery_schedule(
                         prices_df       = prices_df,
                         battery_kwh     = size_kwh,
-                        max_power_kw    = req.power_kw,
-                        charge_power_kw = req.power_kw,
-                        efficiency      = req.efficiency,
+                        max_power_kw    = power_kw,
+                        charge_power_kw = power_kw,
+                        efficiency      = efficiency,
                         initial_soc     = 0.5,
                         min_soc         = 0.1,
                         min_end_soc     = 0.1,
@@ -360,12 +406,18 @@ async def run_battery_sizing(req: BatterySizingRequest):
                 logger.warning("[sizing] MILP mislukt voor %.1f kWh: %s", size_kwh, exc)
                 revenue = 0.0
 
-            results.append(BatterySizingResult(
-                battery_kwh       = size_kwh,
-                total_revenue_eur = round(revenue, 4),
-                revenue_per_kwh   = round(revenue / size_kwh, 6) if size_kwh > 0 else 0.0,
-            ))
-            logger.debug("[sizing] %.0f kWh → €%.4f (€%.6f/kWh)", size_kwh, revenue, revenue / size_kwh if size_kwh > 0 else 0)
+            ann_revenue = revenue * annualize
+            results.append({
+                "battery_kwh":            size_kwh,
+                "total_revenue_eur":      round(revenue, 4),
+                "annualized_revenue_eur": round(ann_revenue, 2),
+                "revenue_per_kwh":        round(revenue / size_kwh, 6) if size_kwh > 0 else 0.0,
+                "annualized_per_kwh":     round(ann_revenue / size_kwh, 4) if size_kwh > 0 else 0.0,
+            })
+            logger.debug(
+                "[sizing] %.0f kWh → €%.2f/periode · €%.2f/jaar",
+                size_kwh, revenue, ann_revenue,
+            )
 
         return results
 
@@ -376,5 +428,20 @@ async def run_battery_sizing(req: BatterySizingRequest):
         logger.exception("[sizing] Berekening mislukt")
         raise HTTPException(status_code=500, detail=str(exc))
 
-    logger.info("[sizing] ✅ %d groottes berekend voor %d prijsslots", len(results), len(req.prices))
-    return BatterySizingResponse(results=results)
+    payload = {
+        "days_analyzed":   round(actual_days),
+        "slots_analyzed":  len(prices_df),
+        "start_date":      str(start_date),
+        "end_date":        str(date.today()),
+        "power_kw":        power_kw,
+        "efficiency":      efficiency,
+        "computed_at":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "results":         results,
+    }
+
+    _sizing_cache[cache_key] = payload
+    logger.info("[sizing] ✅ %d groottes klaar · %.0f dagen · €%.2f–€%.2f/jaar",
+                len(results), actual_days,
+                min(r["annualized_revenue_eur"] for r in results),
+                max(r["annualized_revenue_eur"] for r in results))
+    return payload
