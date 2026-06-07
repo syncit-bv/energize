@@ -13,9 +13,9 @@ const PriceTip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
   const p = payload[0]?.value
   return (
-    <div style={{ background:'#1a1d27', border:'1px solid #2a2d3e', borderRadius:8, padding:'10px 14px' }}>
-      <div style={{ color:'#8892a4', fontSize:12 }}>{label}</div>
-      <div style={{ color: p < 0 ? '#ef4444' : p < 50 ? '#22c55e' : '#e2e8f0', fontWeight:700, fontSize:16 }}>
+    <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:8, padding:'10px 14px' }}>
+      <div style={{ color:'var(--muted)', fontSize:12 }}>{label}</div>
+      <div style={{ color: p < 0 ? '#ef4444' : p < 50 ? '#22c55e' : 'var(--text)', fontWeight:700, fontSize:16 }}>
         {p?.toFixed(2)} €/MWh
       </div>
     </div>
@@ -93,9 +93,19 @@ export default function Prices() {
 
   return (
     <div>
-      <div className="page-header">
-        <div className="page-title">⚡ Dag-ahead Prijzen</div>
-        <div className="page-sub">ENTSO-E Belgische elektriciteitsmarkt</div>
+      <div className="page-header" style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+        <div>
+          <div className="page-title">⚡ Dag-ahead Prijzen</div>
+          <div className="page-sub">ENTSO-E Belgische elektriciteitsmarkt</div>
+        </div>
+        <div style={{ textAlign:'right', paddingTop:2 }}>
+          <div style={{ color:'var(--text)', fontWeight:600, fontSize:14 }}>
+            📅 {new Date().toLocaleDateString('nl-BE', { weekday:'long', day:'numeric', month:'long', year:'numeric' })}
+          </div>
+          <div style={{ color:'var(--muted)', fontSize:12, marginTop:2 }}>
+            Periode: laatste {days} dag{days !== 1 ? 'en' : ''}
+          </div>
+        </div>
       </div>
 
       {/* Overall KPIs */}
@@ -136,7 +146,7 @@ export default function Prices() {
                 : '⏳ D+1 nog niet beschikbaar'}
             </div>
             {!hasTomorrow && (
-              <span style={{ color:'#4b5563', fontSize:12 }}>
+              <span style={{ color:'var(--muted)', fontSize:12 }}>
                 ENTSO-E publiceert morgen-prijzen doorgaans na 13:00 CET
               </span>
             )}
@@ -152,9 +162,9 @@ export default function Prices() {
                   ['Max morgen',     `${d1Max.toFixed(1)} €/MWh`, '#f97316'],
                   ['Negatief morgen',`${d1Neg} kwartier${d1Neg !== 1 ? 'en' : ''}`, d1Neg > 0 ? '#22c55e' : '#4b5563'],
                 ].map(([lbl, val, clr]) => (
-                  <div key={lbl} style={{ background:'rgba(255,255,255,0.03)', borderRadius:8,
-                    padding:'10px 12px', border:'1px solid rgba(255,255,255,0.06)' }}>
-                    <div style={{ color:'#6b7280', fontSize:11 }}>{lbl}</div>
+                  <div key={lbl} style={{ background:'var(--bg)', borderRadius:8,
+                    padding:'10px 12px', border:'1px solid var(--border)' }}>
+                    <div style={{ color:'var(--muted)', fontSize:11 }}>{lbl}</div>
                     <div style={{ color:clr, fontWeight:700, fontSize:15, marginTop:3 }}>{val}</div>
                   </div>
                 ))}
@@ -165,11 +175,11 @@ export default function Prices() {
                 {bestCharge && (
                   <div style={{ background:'rgba(34,197,94,0.08)', borderRadius:8, padding:'12px 14px',
                     border:'1px solid rgba(34,197,94,0.22)' }}>
-                    <div style={{ color:'#4b5563', fontSize:11, marginBottom:5 }}>🔋 Beste laaduur</div>
+                    <div style={{ color:'var(--muted)', fontSize:11, marginBottom:5 }}>🔋 Beste laaduur</div>
                     <div style={{ color:'#22c55e', fontWeight:700, fontSize:17 }}>
                       {fmtH(bestCharge.ts)} – {fmtH(bestCharge.end)}
                     </div>
-                    <div style={{ color:'#374151', fontSize:12, marginTop:3 }}>
+                    <div style={{ color:'var(--muted)', fontSize:12, marginTop:3 }}>
                       gem. {bestCharge.avg.toFixed(1)} €/MWh
                     </div>
                   </div>
@@ -177,11 +187,11 @@ export default function Prices() {
                 {bestSell && (
                   <div style={{ background:'rgba(249,115,22,0.08)', borderRadius:8, padding:'12px 14px',
                     border:'1px solid rgba(249,115,22,0.22)' }}>
-                    <div style={{ color:'#4b5563', fontSize:11, marginBottom:5 }}>💰 Beste ontlaaduur</div>
+                    <div style={{ color:'var(--muted)', fontSize:11, marginBottom:5 }}>💰 Beste ontlaaduur</div>
                     <div style={{ color:'#f97316', fontWeight:700, fontSize:17 }}>
                       {fmtH(bestSell.ts)} – {fmtH(bestSell.end)}
                     </div>
-                    <div style={{ color:'#374151', fontSize:12, marginTop:3 }}>
+                    <div style={{ color:'var(--muted)', fontSize:12, marginTop:3 }}>
                       gem. {bestSell.avg.toFixed(1)} €/MWh
                     </div>
                   </div>
@@ -189,14 +199,14 @@ export default function Prices() {
               </div>
 
               {/* D+1 mini bar chart — color-coded by price */}
-              <div style={{ color:'#4b5563', fontSize:11, marginBottom:6 }}>
+              <div style={{ color:'var(--muted)', fontSize:11, marginBottom:6 }}>
                 Kwartier-prijzen morgen (kleurcodering: 🟢 goedkoop · 🔵 midden · 🟡 duur · 🟠 piek · 🔴 negatief)
               </div>
               <ResponsiveContainer width="100%" height={170}>
                 <BarChart data={d1ChartData} margin={{ top:2, right:8, bottom:0, left:0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e2130"/>
-                  <XAxis dataKey="ts" tick={{ fill:'#8892a4', fontSize:10 }} interval={7}/>
-                  <YAxis tick={{ fill:'#8892a4', fontSize:10 }} unit=" €"/>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+                  <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:10 }} interval={7}/>
+                  <YAxis tick={{ fill:'#64748b', fontSize:10 }} unit=" €"/>
                   <Tooltip content={<PriceTip/>}/>
                   <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="3 3"/>
                   <Bar dataKey="price" radius={[2,2,0,0]}>
@@ -239,9 +249,9 @@ export default function Prices() {
                   <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3e"/>
-              <XAxis dataKey="ts" tick={{ fill:'#8892a4', fontSize:11 }} interval="preserveStartEnd"/>
-              <YAxis tick={{ fill:'#8892a4', fontSize:11 }} unit=" €"/>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+              <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:11 }} interval="preserveStartEnd"/>
+              <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" €"/>
               <Tooltip content={<PriceTip/>}/>
               <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="4 4"/>
               <Area type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={2}

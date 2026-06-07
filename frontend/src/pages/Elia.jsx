@@ -4,15 +4,15 @@ import {
   ResponsiveContainer, Legend
 } from 'recharts'
 import { fetchImbalance, fetchSolarWind } from '../api'
-import { format, parseISO, subDays } from 'date-fns'
+import { format, parseISO } from 'date-fns'
 
 const toDateStr = (d) => format(d, 'yyyy-MM-dd')
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
   return (
-    <div style={{ background:'#1a1d27', border:'1px solid #2a2d3e', borderRadius:8, padding:'10px 14px' }}>
-      <div style={{ color:'#8892a4', fontSize:12, marginBottom:4 }}>{label}</div>
+    <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:8, padding:'10px 14px' }}>
+      <div style={{ color:'var(--muted)', fontSize:12, marginBottom:4 }}>{label}</div>
       {payload.map((p,i) => (
         <div key={i} style={{ color:p.stroke||p.fill, fontWeight:600, fontSize:13 }}>
           {p.name}: {typeof p.value === 'number' ? p.value.toFixed(2) : p.value}
@@ -23,7 +23,7 @@ const CustomTooltip = ({ active, payload, label }) => {
 }
 
 export default function Elia() {
-  const [date, setDate]               = useState(toDateStr(subDays(new Date(), 1)))
+  const [date, setDate]               = useState(toDateStr(new Date()))
   const [imbalData, setImbalData]     = useState([])
   const [swData, setSwData]           = useState([])
   const [loadingImbal, setLoadingImbal] = useState(false)
@@ -75,10 +75,14 @@ export default function Elia() {
 
       {/* Date selector */}
       <div className="card" style={{ display:'flex', alignItems:'center', gap:16, padding:'14px 20px' }}>
-        <label style={{ color:'#8892a4', fontSize:13 }}>Datum:</label>
+        <label style={{ color:'var(--muted)', fontSize:13 }}>Datum:</label>
         <input type="date" value={date} onChange={e => setDate(e.target.value)}
           max={toDateStr(new Date())} className="form-input" style={{ width:'auto' }}/>
-        <span style={{ color:'#4b5563', fontSize:12 }}>Elia open data — 1 dag resolutie</span>
+        <span style={{ color:'var(--muted2)', fontSize:12 }}>Elia open data — 1 dag resolutie</span>
+        {date === toDateStr(new Date()) && (
+          <span style={{ background:'rgba(59,130,246,0.12)', color:'var(--accent)', fontSize:11,
+            fontWeight:600, padding:'2px 8px', borderRadius:999 }}>Vandaag</span>
+        )}
       </div>
 
       {/* Imbalance section */}
@@ -103,11 +107,11 @@ export default function Elia() {
         {!loadingImbal && !errorImbal && imbalChart.length > 0 && (
           <ResponsiveContainer width="100%" height={260}>
             <LineChart data={imbalChart} margin={{ top:4, right:8, bottom:0, left:0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3e"/>
-              <XAxis dataKey="ts" tick={{ fill:'#8892a4', fontSize:11 }} interval="preserveStartEnd"/>
-              <YAxis tick={{ fill:'#8892a4', fontSize:11 }} unit=" MW"/>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+              <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:11 }} interval="preserveStartEnd"/>
+              <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" MW"/>
               <Tooltip content={<CustomTooltip/>}/>
-              <Legend wrapperStyle={{ color:'#8892a4', fontSize:12 }}/>
+              <Legend wrapperStyle={{ color:'#64748b', fontSize:12 }}/>
               <Line type="monotone" dataKey="imbal" name="Systeem onbalans" stroke="#f97316" dot={false} strokeWidth={2}/>
               <Line type="monotone" dataKey="nrv" name="NRV" stroke="#8b5cf6" dot={false} strokeWidth={1.5} strokeDasharray="4 2"/>
             </LineChart>
@@ -161,11 +165,11 @@ export default function Elia() {
                   <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2a2d3e"/>
-              <XAxis dataKey="ts" tick={{ fill:'#8892a4', fontSize:11 }} interval="preserveStartEnd"/>
-              <YAxis tick={{ fill:'#8892a4', fontSize:11 }} unit=" MW"/>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(100,116,139,0.25)"/>
+              <XAxis dataKey="ts" tick={{ fill:'#64748b', fontSize:11 }} interval="preserveStartEnd"/>
+              <YAxis tick={{ fill:'#64748b', fontSize:11 }} unit=" MW"/>
               <Tooltip content={<CustomTooltip/>}/>
-              <Legend wrapperStyle={{ color:'#8892a4', fontSize:12 }}/>
+              <Legend wrapperStyle={{ color:'#64748b', fontSize:12 }}/>
               <Area type="monotone" dataKey="solar" name="Zonne-energie" stroke="#f59e0b" fill="url(#solarGrad)" strokeWidth={2} dot={false}/>
               <Area type="monotone" dataKey="wind_on" name="Wind onshore" stroke="#22c55e" fill="url(#windOnGrad)" strokeWidth={2} dot={false}/>
               <Area type="monotone" dataKey="wind_off" name="Wind offshore" stroke="#3b82f6" fill="url(#windOffGrad)" strokeWidth={2} dot={false}/>
