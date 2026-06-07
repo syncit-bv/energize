@@ -613,6 +613,8 @@ export default function Optimizer() {
   const summaryBase   = resultBase?.summary || {}
   const schedule      = result?.schedule || []
 
+  const hasSolar = solarKwp > 0
+
   // Wacht op beide jobs voor vergelijking als er 2 lopen
   const bothJobsDone  = hasSolar
     ? (job?.status === 'completed' && (!jobIdBase || jobBase?.status === 'completed'))
@@ -659,7 +661,6 @@ export default function Optimizer() {
   )
 
   const cColor   = (c) => c > 2 ? '#ef4444' : c > 1 ? '#f59e0b' : '#22c55e'
-  const hasSolar = solarKwp > 0
   const estKwh   = estimateDailyKwh(solarKwp)
   const badSpread = rbChargeThr >= rbDischargeThr
   const milpGross = summary.revenue_execute_eur ?? null
