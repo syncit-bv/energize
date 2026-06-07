@@ -399,6 +399,7 @@ export default function Optimizer() {
   const [horizonDays, setHorizonDays] = useState(1)
   const [dischPow,    setDischPow]    = useState(5.0)
   const [solarKwp,    setSolarKwp]    = useState(0)
+  const [schedOpen,   setSchedOpen]   = useState(false)  // Kwartier Schema uitschuifbaar
 
   // MILP job state — job = MILP+Solar (of basis als kWp=0), jobBase = MILP zonder solar
   const [jobId,      setJobId]     = useState(null)
@@ -522,24 +523,13 @@ export default function Optimizer() {
     setError(null); setJob(null); setJobBase(null); setSub(true); setPriceInfo(null)
     setJobId(null); setJobIdBase(null)
     try {
-      // Prijzen ophalen: forward-looking (1–3d) vs historisch backtesting (7–365d)
-      const fetchDays   = Math.min(horizonDays, 365)
+      // Altijd de laatste horizonDays×96 slots: vandaag + N-1 historische dagen
+      // Alle horizonten zijn backward-looking: 1d = vandaag, 2d = vandaag + gisteren, etc.
+      const fetchDays   = Math.min(horizonDays + 1, 366)   // +1 buffer zodat vandaag altijd inzit
       const pricesData  = await fetchDayAhead(fetchDays)
-      let priceFloats
-      if (horizonDays <= 3) {
-        // Forward-looking: filter vanaf nu, neem de volgende horizonDays * 96 slots
-        const nowMs  = Date.now()
-        const slotMs = Math.floor(nowMs / (15 * 60 * 1000)) * 15 * 60 * 1000
-        priceFloats  = pricesData.records
-          .filter(r => new Date(r.timestamp).getTime() >= slotMs)
-          .slice(0, horizonDays * 96)
-          .map(r => r.price_eur_mwh)
-      } else {
-        // Historisch backtesting: neem de laatste horizonDays * 96 slots (gesorteerd oplopend)
-        priceFloats = pricesData.records
-          .slice(-horizonDays * 96)
-          .map(r => r.price_eur_mwh)
-      }
+      const priceFloats = pricesData.records
+        .slice(-horizonDays * 96)
+        .map(r => r.price_eur_mwh)
 
       if (priceFloats.length < 4) {
         throw new Error(
@@ -874,44 +864,30 @@ export default function Optimizer() {
                 )
               })}
             </div>
-            {horizonDays <= 3 ? (
-              horizonDays === 1 ? (
-                <div style={{ color: 'var(--muted2)', fontSize: 11, marginBottom: 8 }}>
-                  MILP optimaliseert de komende 24 uur in 1 solver-run.
-                </div>
+            {/* Horizon omschrijving — alle knoppen zijn backward-looking (vandaag + verleden) */}
+            <div style={{
+              background: horizonDays === 1 ? 'rgba(59,130,246,0.06)' : 'rgba(251,146,60,0.06)',
+              border: `1px solid ${horizonDays === 1 ? 'rgba(59,130,246,0.2)' : 'rgba(251,146,60,0.25)'}`,
+              borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
+            }}>
+              {horizonDays === 1 ? (
+                <>📅 <strong>Vandaag:</strong> MILP optimaliseert de volledige dag-ahead prijzen van vandaag (96 kwartierslots).</>
               ) : (
-                <div style={{
-                  background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.18)',
-                  borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
-                }}>
-                  🧩 <strong>Rolling horizon:</strong> MILP ziet {horizonDays * 24}h prijzen tegelijk
-                  en optimaliseert over de volledige periode in 1 run.{' '}
-                  <span style={{ color: 'var(--muted2)' }}>
-                    Vereist D+{horizonDays - 1} ENTSO-E prijzen (beschikbaar ~13:00 CET).
-                  </span>
-                </div>
-              )
-            ) : (
-              <div style={{
-                background: 'rgba(251,146,60,0.06)', border: '1px solid rgba(251,146,60,0.25)',
-                borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
-              }}>
-                📊 <strong>Backtesting:</strong> MILP optimaliseert over de afgelopen {
-                  horizonDays === 365 ? '1 jaar' : horizonDays === 180 ? '6 maanden' :
-                  horizonDays === 90 ? '3 maanden' : `${horizonDays} dagen`
-                } historische ENTSO-E prijzen in 1 run.{' '}
-                {horizonDays >= 90 && (
-                  <span style={{ color: '#fb923c', fontWeight: 600 }}>
-                    ⏳ {horizonDays >= 180 ? '10–20 min' : '5–10 min'} rekentijd verwacht.
-                  </span>
-                )}
-                {horizonDays < 90 && (
-                  <span style={{ color: 'var(--muted2)' }}>
-                    ⏳ ~{horizonDays <= 14 ? '30–60 sec' : '2–5 min'} rekentijd.
-                  </span>
-                )}
-              </div>
-            )}
+                <>
+                  📊 <strong>Backtesting:</strong> vandaag + {horizonDays - 1} {horizonDays - 1 === 1 ? 'dag' : 'dagen'} terug
+                  {' '}({horizonDays * 96} slots · {horizonDays === 365 ? '1 jaar' : horizonDays === 180 ? '6 maanden' : horizonDays === 90 ? '3 maanden' : `${horizonDays} dagen`}).{' '}
+                  {horizonDays >= 90 ? (
+                    <span style={{ color: '#fb923c', fontWeight: 600 }}>
+                      ⏳ {horizonDays >= 180 ? '10–20 min' : '5–10 min'} rekentijd.
+                    </span>
+                  ) : (
+                    <span style={{ color: 'var(--muted2)' }}>
+                      ⏳ ~{horizonDays <= 14 ? '30–60 sec' : '2–5 min'} rekentijd.
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
 
             {error && <div className="error" style={{ marginTop: 8 }}>⚠️ {error}</div>}
 
@@ -1447,17 +1423,6 @@ export default function Optimizer() {
                 )
               })()}
 
-              {/* Export */}
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <button onClick={() => exportCSV(schedule, summary)} className="btn" style={{
-                  padding: '7px 16px', fontSize: 13,
-                  border: '1px solid var(--border)', color: 'var(--muted)', borderRadius: 7,
-                  display: 'flex', alignItems: 'center', gap: 6,
-                }}>
-                  📥 Exporteer CSV (Belgisch formaat)
-                </button>
-              </div>
-
               {/* MILP Dispatch grafiek */}
               {chartData.length > 0 && (
                 <div className="card">
@@ -1490,42 +1455,84 @@ export default function Optimizer() {
                 </div>
               )}
 
-              {/* Kwartier-tabel MILP */}
+              {/* Kwartier-tabel MILP — uitschuifbaar */}
               {schedule.length > 0 && (
-                <div className="card">
-                  <div className="card-title">Kwartier Schema MILP ({schedule.length} slots)</div>
-                  <div className="table-wrap">
-                    <table>
-                      <thead><tr>
-                        <th>#</th>
-                        <th>Prijs (€/MWh)</th>
-                        <th>Laden (kWh)</th>
-                        <th>Ontladen (kWh)</th>
-                        <th>SoC (%)</th>
-                        <th>P&L (€)</th>
-                      </tr></thead>
-                      <tbody>
-                        {schedule.map((h, i) => (
-                          <tr key={i}>
-                            <td style={{ color: 'var(--muted)' }}>{i}</td>
-                            <td style={{ color: h.price_eur_mwh < 0 ? '#ef4444' : h.price_eur_mwh < 50 ? '#22c55e' : 'var(--text)' }}>
-                              {h.price_eur_mwh?.toFixed(2) ?? '—'}
-                            </td>
-                            <td style={{ color: '#3b82f6' }}>
-                              {h.charge_kwh > 0.001 ? h.charge_kwh.toFixed(3) : '—'}
-                            </td>
-                            <td style={{ color: '#22c55e' }}>
-                              {h.discharge_kwh > 0.001 ? h.discharge_kwh.toFixed(3) : '—'}
-                            </td>
-                            <td>{h.soc_pct?.toFixed(1) ?? '—'}%</td>
-                            <td style={{ color: (h.net_revenue_eur ?? 0) >= 0 ? '#22c55e' : '#ef4444' }}>
-                              {h.net_revenue_eur != null ? h.net_revenue_eur.toFixed(4) : '—'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                  {/* Header: klikbaar om in/uit te klappen */}
+                  <div
+                    onClick={() => setSchedOpen(o => !o)}
+                    style={{
+                      padding: '14px 20px', cursor: 'pointer',
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      background: schedOpen ? 'var(--surface)' : 'transparent',
+                      borderBottom: schedOpen ? '1px solid var(--border)' : 'none',
+                      userSelect: 'none',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ color: 'var(--muted)', fontSize: 14, transition: 'transform 0.2s',
+                        display: 'inline-block', transform: schedOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+                      <span className="card-title" style={{ margin: 0 }}>
+                        📋 Kwartier Schema MILP
+                      </span>
+                      <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+                        {schedule.length} slots
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={e => { e.stopPropagation(); exportCSV(schedule, summary) }}
+                      style={{
+                        background: 'rgba(100,116,139,0.1)', border: '1px solid var(--border)',
+                        color: 'var(--muted)', borderRadius: 6, padding: '5px 12px',
+                        fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+                      }}
+                    >
+                      📥 Exporteer CSV
+                    </button>
                   </div>
+
+                  {/* Uitklapbaar deel */}
+                  {schedOpen && (
+                    <div className="table-wrap" style={{ padding: '0 0 4px 0' }}>
+                      <table>
+                        <thead><tr>
+                          <th>#</th>
+                          <th>Tijdstip</th>
+                          <th>Prijs (€/MWh)</th>
+                          <th>Laden (kWh)</th>
+                          <th>Ontladen (kWh)</th>
+                          <th>SoC (%)</th>
+                          <th>P&L (€)</th>
+                        </tr></thead>
+                        <tbody>
+                          {schedule.map((h, i) => (
+                            <tr key={i}>
+                              <td style={{ color: 'var(--muted)' }}>{i + 1}</td>
+                              <td style={{ color: 'var(--muted)', fontSize: 11 }}>
+                                {h.datetime
+                                  ? new Date(h.datetime).toLocaleString('nl-BE', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                  : `Slot ${i + 1}`}
+                              </td>
+                              <td style={{ color: h.price_eur_mwh < 0 ? '#ef4444' : h.price_eur_mwh < 50 ? '#22c55e' : 'var(--text)' }}>
+                                {h.price_eur_mwh?.toFixed(2) ?? '—'}
+                              </td>
+                              <td style={{ color: '#3b82f6' }}>
+                                {h.charge_kwh > 0.001 ? h.charge_kwh.toFixed(3) : '—'}
+                              </td>
+                              <td style={{ color: '#22c55e' }}>
+                                {h.discharge_kwh > 0.001 ? h.discharge_kwh.toFixed(3) : '—'}
+                              </td>
+                              <td>{h.soc_pct?.toFixed(1) ?? '—'}%</td>
+                              <td style={{ color: (h.net_revenue_eur ?? 0) >= 0 ? '#22c55e' : '#ef4444' }}>
+                                {h.net_revenue_eur != null ? h.net_revenue_eur.toFixed(4) : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               )}
             </>
