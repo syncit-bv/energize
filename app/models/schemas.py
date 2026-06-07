@@ -84,10 +84,12 @@ class EliaWindRecord(BaseModel):
 class OptimizeRequest(BaseModel):
     prices: List[float] = Field(..., description="Day-ahead prijzen in €/MWh (kwartier-resolutie)")
     battery_kwh: float = Field(10.0, gt=0, description="Batterijcapaciteit in kWh")
-    charge_power_kw: float = Field(5.0, gt=0, description="Max laad-/ontlaadvermogen in kW")
+    charge_power_kw: float = Field(5.0, gt=0, description="Max laadvermogen in kW (afname net; bepaalt capaciteitstarief)")
+    discharge_power_kw: Optional[float] = Field(None, gt=0, description="Max ontlaadvermogen in kW (injectie net); fallback = charge_power_kw")
     efficiency: float = Field(0.95, gt=0, le=1, description="Round-trip efficiëntie")
     initial_soc: float = Field(0.5, ge=0, le=1, description="Initiële state-of-charge (0–1)")
-    min_soc: float = Field(0.1, ge=0, le=1, description="Minimum SOC")
+    min_soc: float = Field(0.1, ge=0, le=1, description="Minimum SOC (reserve)")
+    min_end_soc: Optional[float] = Field(None, ge=0, le=1, description="Minimum eindstatus SOC; fallback = min_soc")
     max_soc: float = Field(0.9, ge=0, le=1, description="Maximum SOC")
     # Optioneel voor solar/wind scenario's
     solar_forecast: Optional[List[float]] = None   # kW per kwartier

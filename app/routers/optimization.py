@@ -87,14 +87,16 @@ def _milp_background(job_id: str, req: OptimizeRequest) -> None:
             imbalance_series = pd.Series(req.imbalance_prices, index=idx, name="imbalance_mid")
 
         # Gemeenschappelijke MILP-parameters
+        # discharge_power_kw = max ontlaadvermogen (injectie), fallback op charge_power_kw
+        # min_end_soc = minimum eindstatus SOC, fallback op min_soc
         common = dict(
             battery_kwh      = req.battery_kwh,
-            max_power_kw     = req.charge_power_kw,
+            max_power_kw     = req.discharge_power_kw if req.discharge_power_kw is not None else req.charge_power_kw,
             charge_power_kw  = req.charge_power_kw,
             efficiency       = req.efficiency,
             initial_soc      = req.initial_soc,
             min_soc          = req.min_soc,
-            min_end_soc      = req.min_soc,  # gebruik min_soc als ondergrens eindstatus
+            min_end_soc      = req.min_end_soc if req.min_end_soc is not None else req.min_soc,
         )
 
         # Kies optimizer op basis van beschikbare data
