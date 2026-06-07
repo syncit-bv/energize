@@ -64,7 +64,7 @@ export default function Prices() {
       } catch { /* stille fout — badge toont niets */ }
     }
     poll()
-    const id = setInterval(poll, 120_000)
+    const id = setInterval(poll, 300_000)   // elke 5 min — matcht backend scheduler
     return () => clearInterval(id)
   }, [days])
 
@@ -217,14 +217,20 @@ export default function Prices() {
             </div>
           )}
 
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center',
-            marginBottom: hasTomorrow ? 16 : 0 }}>
-            <div className="card-title" style={{ margin:0 }}>
-              {hasTomorrow
-                ? `🎯 D+1 Prijsintelligentie — ${d1Date}`
-                : '⏳ D+1 nog niet beschikbaar'}
+          <div style={{ marginBottom: hasTomorrow ? 16 : 0 }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <div className="card-title" style={{ margin:0 }}>
+                {hasTomorrow
+                  ? `🎯 D+1 Prijsintelligentie — ${d1Date}`
+                  : '⏳ D+1 nog niet beschikbaar'}
+              </div>
+              {/* Badge naast titel enkel als beschikbaar */}
+              {hasTomorrow && statusBadge}
             </div>
-            {statusBadge}
+            {/* Badge onder titel als nog niet beschikbaar */}
+            {!hasTomorrow && (
+              <div style={{ marginTop:6 }}>{statusBadge}</div>
+            )}
           </div>
 
           {hasTomorrow && (
