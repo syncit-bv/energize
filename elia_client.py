@@ -11,12 +11,14 @@ Dataset status (gecontroleerd juni 2026):
 """
 from __future__ import annotations
 import logging
-from datetime import date as Date
+from datetime import date as Date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
 logger = logging.getLogger(__name__)
 BASE = "https://opendata.elia.be/api/explore/v2.1/catalog/datasets"
+_BRUSSELS = ZoneInfo("Europe/Brussels")
 
 # ods047 bevat geen data na deze datum
 _ODS047_MAX_DATE = Date(2024, 5, 21)
@@ -48,8 +50,18 @@ def _f(val, *fallbacks) -> float:
 
 
 def _date_range_where(target: Date) -> str:
-    next_d = Date.fromordinal(target.toordinal() + 1)
-    return f'datetime >= "{target}T00:00:00Z" AND datetime < "{next_d}T00:00:00Z"'
+    """
+    Genereert een WHERE-clause die de volledige Brusselse dag (lokale tijd) dekt in UTC.
+    Elia slaat timestamps op in UTC, maar de gebruiker kiest datums in Belgische tijd (CET/CEST).
+    Voorbeeld: Belgische datum 7 jun → zoek in UTC 6 jun 22:00 t/m 7 jun 22:00 (CEST/UTC+2).
+    """
+    start_local = datetime(target.year, target.month, target.day, 0, 0, 0, tzinfo=_BRUSSELS)
+    next_d      = target + timedelta(days=1)
+    end_local   = datetime(next_d.year, next_d.month, next_d.day, 0, 0, 0, tzinfo=_BRUSSELS)
+    start_utc   = start_local.astimezone(timezone.utc)
+    end_utc     = end_local.astimezone(timezone.utc)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return f'datetime >= "{start_utc.strftime(fmt)}" AND datetime < "{end_utc.strftime(fmt)}"'
 
 
 class EliaClient:
