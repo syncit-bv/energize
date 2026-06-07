@@ -73,7 +73,8 @@ export default function App() {
     <div className="layout">
       <aside className="sidebar">
         <div className="sidebar-logo">
-          <FluxyLogo size={44}/>
+          <img src="/fluxy-logo.jpg" alt="Fluxy logo"
+            style={{ width: 44, height: 44, objectFit: 'contain', borderRadius: 6 }}/>
           <div>
             <div style={{ fontWeight: 700, color: 'var(--text)', fontSize: 17, letterSpacing: '-0.3px' }}>Fluxy</div>
             <div style={{ color: 'var(--muted)', fontSize: 11 }}>Energy Management System</div>
