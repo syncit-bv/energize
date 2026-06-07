@@ -6,11 +6,26 @@
   --border:   #2a2d3e;
   --text:     #e2e8f0;
   --muted:    #8892a4;
+  --muted2:   #4b5563;
   --accent:   #3b82f6;
   --green:    #22c55e;
   --yellow:   #eab308;
   --red:      #ef4444;
   --orange:   #f97316;
+}
+
+[data-theme="light"] {
+  --bg:       #f1f5f9;
+  --surface:  #ffffff;
+  --border:   #cbd5e1;
+  --text:     #1e293b;
+  --muted:    #64748b;
+  --muted2:   #94a3b8;
+  --accent:   #2563eb;
+  --green:    #16a34a;
+  --yellow:   #ca8a04;
+  --red:      #dc2626;
+  --orange:   #ea580c;
 }
 
 body {
@@ -187,6 +202,6 @@ input[type="range"] { accent-color: var(--accent); }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; padding: 8px 12px; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); }
-td { padding: 8px 12px; border-bottom: 1px solid rgba(42,45,62,0.5); }
+td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
 tr:last-child td { border-bottom: none; }
 fieldset legend { font-size: 12px; color: var(--muted); }
