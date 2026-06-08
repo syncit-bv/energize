@@ -42,10 +42,17 @@ def _build_prices_df(prices: List[float]) -> pd.DataFrame:
     Zet een lijst van float-prijzen (EUR/MWh, kwartier-resolutie) om naar
     een DataFrame met kolommen `datetime` en `price_eur_mwh`, zoals verwacht
     door milp_optimizer.optimize_battery_schedule().
-    Tijdstempels starten op vandaag 00:00 UTC, stap 15 minuten.
+
+    Tijdstempels eindigen op vandaag 23:45 UTC zodat historische backtests
+    correct backward-looking zijn (N dagen = vandaag + N-1 verleden dagen).
+    Voor 1 dag (96 slots): start = vandaag 00:00 UTC.
+    Voor N dagen: start = vandaag - (N-1) dagen 00:00 UTC.
     """
-    base = datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    timestamps = pd.date_range(start=base, periods=len(prices), freq="15min", tz="UTC")
+    n_slots      = len(prices)
+    n_days_back  = max(0, n_slots // 96 - 1)   # 96 slots = 1 dag → 0 dagen terug
+    today_utc    = datetime.now(tz=timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    base         = today_utc - timedelta(days=n_days_back)
+    timestamps   = pd.date_range(start=base, periods=n_slots, freq="15min", tz="UTC")
     return pd.DataFrame({"datetime": timestamps, "price_eur_mwh": prices})
 
 
