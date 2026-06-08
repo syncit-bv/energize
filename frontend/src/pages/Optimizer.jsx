@@ -1579,7 +1579,7 @@ export default function Optimizer() {
                       {Array.from({ length: numDays }, (_, d) => {
                         const daySlots   = schedule.slice(d * 96, (d + 1) * 96)
                         const dayGross   = daySlots.reduce((s, r) => s + (r.net_revenue_eur ?? 0), 0)
-                        const dayDate    = new Date(Date.now() + d * 86_400_000)
+                        const dayDate    = new Date(Date.now() - (numDays - 1 - d) * 86_400_000)
                         const dayLabel   = dayDate.toLocaleDateString('nl-BE', {
                           weekday: 'short', day: 'numeric', month: 'short',
                         })
