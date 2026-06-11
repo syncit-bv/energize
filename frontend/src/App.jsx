@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import Prices from './pages/Prices'
 import Optimizer from './pages/Optimizer'
 import Elia from './pages/Elia'
+import { BoltIcon, CalculatorIcon, GlobeAltIcon, SunIcon, MoonIcon } from '@heroicons/react/24/outline'
 
 const FluxyLogo = ({ size = 44 }) => (
   <svg width={size} height={size} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -43,9 +44,9 @@ const FluxyLogo = ({ size = 44 }) => (
 )
 
 const NAV = [
-  { id: 'prices',    icon: '⚡', label: 'Dag-ahead Prijzen' },
-  { id: 'optimizer', icon: '🔋', label: 'MILP Optimizer' },
-  { id: 'elia',      icon: '🌿', label: 'Elia Netwerk' },
+  { id: 'prices',    icon: BoltIcon,      label: 'Dag-ahead Prijzen' },
+  { id: 'optimizer', icon: CalculatorIcon, label: 'MILP Optimizer' },
+  { id: 'elia',      icon: GlobeAltIcon,  label: 'Elia Netwerk' },
 ]
 
 function getInitialTheme() {
@@ -82,10 +83,10 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {NAV.map(({ id, icon, label }) => (
+          {NAV.map(({ id, icon: Icon, label }) => (
             <button key={id} onClick={() => setPage(id)}
               className={`nav-item ${page === id ? 'active' : ''}`}>
-              <span className="nav-icon">{icon}</span>
+              <span className="nav-icon"><Icon width={18} height={18} strokeWidth={2}/></span>
               <span>{label}</span>
             </button>
           ))}
@@ -110,7 +111,9 @@ export default function App() {
             }}
             title={theme === 'dark' ? 'Schakel naar lichtmodus' : 'Schakel naar donkermodus'}
           >
-            <span style={{ fontSize: 15 }}>{theme === 'dark' ? '☀️' : '🌙'}</span>
+            {theme === 'dark'
+              ? <SunIcon width={16} height={16} strokeWidth={2}/>
+              : <MoonIcon width={16} height={16} strokeWidth={2}/>}
             <span>{theme === 'dark' ? 'Lichtmodus' : 'Donkermodus'}</span>
           </button>
           <div style={{ color: 'var(--muted2)', fontSize: 11, textAlign: 'center' }}>

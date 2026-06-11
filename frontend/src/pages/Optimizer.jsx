@@ -5,6 +5,14 @@ import {
   ReferenceLine,
 } from 'recharts'
 import { runOptimization, pollJob, fetchDayAhead, fetchYesterdaySoc, startBatterySizing } from '../api'
+import {
+  CalculatorIcon, ClockIcon, Cog6ToothIcon, CheckCircleIcon, XCircleIcon,
+  SunIcon, ExclamationTriangleIcon, CalendarDaysIcon, ChartBarIcon, ArrowPathIcon,
+  BoltIcon, ArrowTrendingUpIcon, TrophyIcon, AdjustmentsHorizontalIcon,
+  InformationCircleIcon, SignalIcon, LightBulbIcon, ScaleIcon,
+  ClipboardDocumentListIcon, ArrowDownTrayIcon, MagnifyingGlassIcon,
+  BeakerIcon, NoSymbolIcon, BanknotesIcon, ListBulletIcon,
+} from '@heroicons/react/24/outline'
 
 const POLL_INTERVAL   = 2000
 
@@ -181,8 +189,14 @@ const Slider = ({ label, value, min, max, step, onChange, fmt, accent }) => (
 
 const StatusBadge = ({ status }) => {
   const cls = { pending: 'badge-pending', running: 'badge-running', completed: 'badge-done', failed: 'badge-failed' }
-  const lbl = { pending: '⏳ Wachten', running: '⚙️ Bezig…', completed: '✅ Klaar', failed: '❌ Mislukt' }
-  return <span className={`badge ${cls[status] || 'badge-pending'}`}>{lbl[status] || status}</span>
+  const icon = { pending: ClockIcon, running: Cog6ToothIcon, completed: CheckCircleIcon, failed: XCircleIcon }
+  const lbl = { pending: 'Wachten', running: 'Bezig…', completed: 'Klaar', failed: 'Mislukt' }
+  const Icon = icon[status] || ClockIcon
+  return (
+    <span className={`badge ${cls[status] || 'badge-pending'}`} style={{ display:'inline-flex', alignItems:'center', gap:4 }}>
+      <Icon width={11} height={11} strokeWidth={2.5}/> {lbl[status] || status}
+    </span>
+  )
 }
 
 // Tooltip voor dispatch bar chart
@@ -734,10 +748,10 @@ export default function Optimizer() {
   return (
     <div>
       <div className="page-header">
-        <div className="page-title">🔋 MILP Optimizer</div>
+        <div className="page-title" style={{ display:'flex', alignItems:'center', gap:8 }}><CalculatorIcon width={22} height={22} strokeWidth={2}/> MILP Optimizer</div>
         <div className="page-sub">
           Batterij dispatch optimalisatie via PuLP + HiGHS solver
-          {hasSolar && <span style={{ color: '#f59e0b', marginLeft: 8 }}>· ☀️ MILP+Solar actief</span>}
+          {hasSolar && <span style={{ color: '#f59e0b', marginLeft: 8, display:'inline-flex', alignItems:'center', gap:4 }}>· <SunIcon width={13} height={13} strokeWidth={2}/> MILP+Solar actief</span>}
         </div>
       </div>
 
@@ -816,8 +830,8 @@ export default function Optimizer() {
             <Slider label="Start SOC"    value={initSoc} min={0.05} max={1}    step={0.05} onChange={setInitSoc} fmt={v => `${(v*100).toFixed(0)}%`}/>
             {/* Feature #22: aanbevolen start-SOC badge */}
             {yesterdaySocLoading ? (
-              <div style={{ fontSize: 11, color: 'var(--muted2)', marginBottom: 8, paddingLeft: 2 }}>
-                ⏳ Aanbevolen SOC berekenen…
+              <div style={{ fontSize: 11, color: 'var(--muted2)', marginBottom: 8, paddingLeft: 2, display:'flex', alignItems:'center', gap:4 }}>
+                <ClockIcon width={12} height={12} strokeWidth={2}/> Aanbevolen SOC berekenen…
               </div>
             ) : yesterdaySoc?.final_soc_pct != null ? (
               <div style={{
@@ -825,8 +839,8 @@ export default function Optimizer() {
                 background: 'rgba(34,197,94,0.06)', border: '1px solid rgba(34,197,94,0.2)',
                 borderRadius: 7, padding: '7px 12px', marginBottom: 8, fontSize: 12,
               }}>
-                <span style={{ color: 'var(--muted)' }}>
-                  💡 Aanbevolen start-SOC&nbsp;
+                <span style={{ color: 'var(--muted)', display:'inline-flex', alignItems:'center', gap:4 }}>
+                  <LightBulbIcon width={13} height={13} strokeWidth={2}/> Aanbevolen start-SOC&nbsp;
                   <strong style={{ color: '#22c55e' }}>
                     {yesterdaySoc.final_soc_pct.toFixed(0)}%
                   </strong>
@@ -861,8 +875,9 @@ export default function Optimizer() {
               <div style={{
                 background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.2)',
                 borderRadius: 7, padding: '8px 12px', fontSize: 12, color: '#f59e0b', marginBottom: 4,
+                display:'flex', alignItems:'center', gap:4, flexWrap:'wrap',
               }}>
-                ☀️ Geschatte dagopbrengst: <strong>~{estKwh.toFixed(1)} kWh/dag</strong>
+                <SunIcon width={13} height={13} strokeWidth={2}/> Geschatte dagopbrengst: <strong>~{estKwh.toFixed(1)} kWh/dag</strong>
                 <span style={{ color: 'var(--muted2)', marginLeft: 6 }}>→ MILP+Solar actief</span>
               </div>
             ) : (
@@ -876,9 +891,11 @@ export default function Optimizer() {
             <div style={{
               background: 'rgba(168,85,247,0.06)', border: '1px solid rgba(168,85,247,0.18)',
               borderRadius: 8, padding: '9px 12px', marginBottom: 12, fontSize: 12, color: 'var(--muted)',
+              display:'flex', alignItems:'flex-start', gap:6,
             }}>
-              💡 Simpele aan/uit logica als baseline. Resultaat verschijnt zodra prijzen geladen zijn
-              (na ▶ Optimaliseer). Drempelwaarden zijn live aanpasbaar.
+              <LightBulbIcon width={13} height={13} strokeWidth={2} style={{ flexShrink:0, marginTop:1 }}/>
+              <span>Simpele aan/uit logica als baseline. Resultaat verschijnt zodra prijzen geladen zijn
+              (na ▶ Optimaliseer). Drempelwaarden zijn live aanpasbaar.</span>
             </div>
             <Slider label="Laden onder (€/MWh)" value={rbChargeThr}
               min={-50} max={200} step={5}
@@ -889,8 +906,8 @@ export default function Optimizer() {
               onChange={setRbDischargeThr} fmt={v => `${v} €/MWh`}
               accent="#22c55e"/>
             {badSpread ? (
-              <div style={{ color: '#ef4444', fontSize: 11, marginBottom: 6 }}>
-                ⚠️ Laaddrempel moet lager zijn dan ontlaaddrempel voor arbitrage
+              <div style={{ color: '#ef4444', fontSize: 11, marginBottom: 6, display:'flex', alignItems:'center', gap:4 }}>
+                <ExclamationTriangleIcon width={13} height={13} strokeWidth={2}/> Laaddrempel moet lager zijn dan ontlaaddrempel voor arbitrage
               </div>
             ) : (
               <div style={{
@@ -900,7 +917,7 @@ export default function Optimizer() {
                 <span>Spread: <strong style={{ color: rbDischargeThr - rbChargeThr >= 50 ? '#22c55e' : '#f59e0b' }}>
                   {rbDischargeThr - rbChargeThr} €/MWh
                 </strong></span>
-                <span>Negatieve prijs → altijd laden ⚡</span>
+                <span style={{ display:'flex', alignItems:'center', gap:4 }}>Negatieve prijs → altijd laden <BoltIcon width={12} height={12} strokeWidth={2}/></span>
               </div>
             )}
 
@@ -944,21 +961,24 @@ export default function Optimizer() {
               borderRadius: 7, padding: '8px 12px', fontSize: 11, color: 'var(--muted)', marginBottom: 8,
             }}>
               {horizonDays === 1 ? (
-                <>📅 <strong>Vandaag:</strong> MILP optimaliseert de volledige dag-ahead prijzen van vandaag (96 kwartierslots).</>
+                <span style={{ display:'flex', alignItems:'flex-start', gap:6 }}><CalendarDaysIcon width={14} height={14} strokeWidth={2} style={{ flexShrink:0, marginTop:1 }}/><span><strong>Vandaag:</strong> MILP optimaliseert de volledige dag-ahead prijzen van vandaag (96 kwartierslots).</span></span>
               ) : (
-                <>
-                  📊 <strong>Backtesting:</strong> vandaag + {horizonDays - 1} {horizonDays - 1 === 1 ? 'dag' : 'dagen'} terug
-                  {' '}({horizonDays * 96} slots · {horizonDays === 365 ? '1 jaar' : horizonDays === 180 ? '6 maanden' : horizonDays === 90 ? '3 maanden' : `${horizonDays} dagen`}).{' '}
-                  {horizonDays >= 90 ? (
-                    <span style={{ color: '#fb923c', fontWeight: 600 }}>
-                      ⏳ {horizonDays >= 180 ? '10–20 min' : '5–10 min'} rekentijd.
-                    </span>
-                  ) : (
-                    <span style={{ color: 'var(--muted2)' }}>
-                      ⏳ ~{horizonDays <= 14 ? '30–60 sec' : '2–5 min'} rekentijd.
-                    </span>
-                  )}
-                </>
+                <span style={{ display:'flex', alignItems:'flex-start', gap:6 }}>
+                  <ChartBarIcon width={14} height={14} strokeWidth={2} style={{ flexShrink:0, marginTop:1 }}/>
+                  <span>
+                    <strong>Backtesting:</strong> vandaag + {horizonDays - 1} {horizonDays - 1 === 1 ? 'dag' : 'dagen'} terug
+                    {' '}({horizonDays * 96} slots · {horizonDays === 365 ? '1 jaar' : horizonDays === 180 ? '6 maanden' : horizonDays === 90 ? '3 maanden' : `${horizonDays} dagen`}).{' '}
+                    {horizonDays >= 90 ? (
+                      <span style={{ color: '#fb923c', fontWeight: 600, display:'inline-flex', alignItems:'center', gap:4 }}>
+                        <ClockIcon width={12} height={12} strokeWidth={2}/> {horizonDays >= 180 ? '10–20 min' : '5–10 min'} rekentijd.
+                      </span>
+                    ) : (
+                      <span style={{ color: 'var(--muted2)', display:'inline-flex', alignItems:'center', gap:4 }}>
+                        <ClockIcon width={12} height={12} strokeWidth={2}/> ~{horizonDays <= 14 ? '30–60 sec' : '2–5 min'} rekentijd.
+                      </span>
+                    )}
+                  </span>
+                </span>
               )}
             </div>
 
@@ -977,30 +997,30 @@ export default function Optimizer() {
                   style={{ marginTop: 2, accentColor: '#10b981', width: 14, height: 14, flexShrink: 0 }}
                 />
                 <div>
-                  <div style={{ color: rhEnabled ? '#10b981' : 'var(--text)', fontWeight: 600, fontSize: 13 }}>
-                    🔄 Rolling Horizon MILP
+                  <div style={{ color: rhEnabled ? '#10b981' : 'var(--text)', fontWeight: 600, fontSize: 13, display:'flex', alignItems:'center', gap:6 }}>
+                    <ArrowPathIcon width={14} height={14} strokeWidth={2}/> Rolling Horizon MILP
                   </div>
                   <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>
                     {horizonDays === 2
                       ? '2 runs van elk 2 dagen — optimale eind-SOC doorgeketend.'
                       : `${horizonDays} sequentiële MILP-runs · elk 2-daags venster · eind-SOC ketent door naar volgende dag.`}
-                    {' '}<span style={{ color: rhEnabled ? '#10b981' : 'var(--muted2)' }}>
-                      ⏳ +{horizonDays <= 7 ? '~1–3 min' : horizonDays <= 30 ? '~5–15 min' : 'lang'} extra rekentijd.
+                    {' '}<span style={{ color: rhEnabled ? '#10b981' : 'var(--muted2)', display:'inline-flex', alignItems:'center', gap:4 }}>
+                      <ClockIcon width={12} height={12} strokeWidth={2}/> +{horizonDays <= 7 ? '~1–3 min' : horizonDays <= 30 ? '~5–15 min' : 'lang'} extra rekentijd.
                     </span>
                   </div>
                 </div>
               </label>
             )}
 
-            {error && <div className="error" style={{ marginTop: 8 }}>⚠️ {error}</div>}
+            {error && <div className="error" style={{ marginTop: 8, display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={14} height={14} strokeWidth={2}/> {error}</div>}
 
             <button type="submit" className="btn btn-primary"
               style={{ marginTop: 16, width: '100%' }}
               disabled={submitting || job?.status === 'running'}>
               {submitting
-                ? '📡 Prijzen laden…'
+                ? <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}><SignalIcon width={14} height={14} strokeWidth={2}/> Prijzen laden…</span>
                 : job?.status === 'running'
-                ? '⚙️ Bezig…'
+                ? <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}><Cog6ToothIcon width={14} height={14} strokeWidth={2}/> Bezig…</span>
                 : hasSolar
                   ? `▶ Optimaliseer ${horizonDays > 1 ? horizonDays + 'd ' : ''}+ Solar`
                   : `▶ Optimaliseer${horizonDays > 1 ? ' ' + horizonDays + ' dagen' : ''}`}
@@ -1014,7 +1034,7 @@ export default function Optimizer() {
           {/* ── Batterij Specs & Validatie ── */}
           <div className="card" style={{ padding: '20px 22px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <div className="card-title" style={{ margin: 0 }}>🔬 Batterij Specs & Validatie</div>
+              <div className="card-title" style={{ margin: 0, display:'flex', alignItems:'center', gap:8 }}><BeakerIcon width={17} height={17} strokeWidth={2}/> Batterij Specs & Validatie</div>
               <div style={{ fontSize: 12, color: 'var(--muted)' }}>live berekend</div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
@@ -1034,15 +1054,15 @@ export default function Optimizer() {
               ))}
             </div>
             {specs.maxCRate > 2
-              ? <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, padding: '8px 12px', fontSize: 13, color: '#ef4444' }}>
-                  ⛔ C-rate = {specs.maxCRate.toFixed(1)}C — te hoog, overweeg grotere batterij of minder vermogen
+              ? <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 7, padding: '8px 12px', fontSize: 13, color: '#ef4444', display:'flex', alignItems:'center', gap:6 }}>
+                  <NoSymbolIcon width={15} height={15} strokeWidth={2}/> C-rate = {specs.maxCRate.toFixed(1)}C — te hoog, overweeg grotere batterij of minder vermogen
                 </div>
               : specs.maxCRate > 1
-              ? <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 7, padding: '8px 12px', fontSize: 13, color: '#f59e0b' }}>
-                  ⚠️ C-rate = {specs.maxCRate.toFixed(1)}C — boven 1C, controleer batterijspecs
+              ? <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 7, padding: '8px 12px', fontSize: 13, color: '#f59e0b', display:'flex', alignItems:'center', gap:6 }}>
+                  <ExclamationTriangleIcon width={15} height={15} strokeWidth={2}/> C-rate = {specs.maxCRate.toFixed(1)}C — boven 1C, controleer batterijspecs
                 </div>
-              : <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: 7, padding: '8px 12px', fontSize: 13, color: '#22c55e' }}>
-                  ✅ C-rate: laden {specs.cRateCh.toFixed(2)}C / ontladen {specs.cRateDis.toFixed(2)}C
+              : <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.2)', borderRadius: 7, padding: '8px 12px', fontSize: 13, color: '#22c55e', display:'flex', alignItems:'center', gap:6 }}>
+                  <CheckCircleIcon width={15} height={15} strokeWidth={2}/> C-rate: laden {specs.cRateCh.toFixed(2)}C / ontladen {specs.cRateDis.toFixed(2)}C
                   &nbsp;·&nbsp; ontladen is <strong>{specs.asymMilp.toFixed(1)}×</strong> sneller dan laden (vs forfait 2.5 kW)
                 </div>
             }
@@ -1051,7 +1071,7 @@ export default function Optimizer() {
           {/* ── Capaciteitstarief ── */}
           <div className="card" style={{ padding: '20px 22px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <div className="card-title" style={{ margin: 0 }}>💶 Capaciteitstarief (Fluvius)</div>
+              <div className="card-title" style={{ margin: 0, display:'flex', alignItems:'center', gap:8 }}><BanknotesIcon width={17} height={17} strokeWidth={2}/> Capaciteitstarief (Fluvius)</div>
               <div style={{ fontSize: 12, color: 'var(--muted)' }}>€{CAP_EUR_KW_YEAR}/kW/jaar</div>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
@@ -1076,7 +1096,7 @@ export default function Optimizer() {
           {/* ── Feature #29: Mono vs Driefasig vergelijking ── */}
           <div className="card" style={{ padding: '20px 22px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div className="card-title" style={{ margin: 0 }}>⚡ Mono vs Driefasig</div>
+              <div className="card-title" style={{ margin: 0, display:'flex', alignItems:'center', gap:8 }}><BoltIcon width={17} height={17} strokeWidth={2}/> Mono vs Driefasig</div>
               <div style={{ fontSize: 11, color: 'var(--muted)' }}>aansluiting vergelijking</div>
             </div>
 
@@ -1151,10 +1171,11 @@ export default function Optimizer() {
             ))}
 
             {/* Netto verschil footer */}
-            <div style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)', borderTop: '1px solid var(--border)', paddingTop: 8 }}>
-              💡 Driefasig geeft +{(CONN.drie.maxInjectie - CONN.mono.maxInjectie).toFixed(1)} kW extra ontlaadvermogen,
+            <div style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)', borderTop: '1px solid var(--border)', paddingTop: 8, display:'flex', alignItems:'flex-start', gap:6 }}>
+              <LightBulbIcon width={14} height={14} strokeWidth={2} style={{ flexShrink:0, marginTop:1 }}/>
+              <span>Driefasig geeft +{(CONN.drie.maxInjectie - CONN.mono.maxInjectie).toFixed(1)} kW extra ontlaadvermogen,
               maar kost +€{((CONN.drie.maxAfname - CONN.mono.maxAfname) * CAP_EUR_KW_YEAR / 12).toFixed(2)}/mnd meer
-              aan capaciteitstarief. Driefasig loont bij grote batterijen met hoge arbitrage-spread.
+              aan capaciteitstarief. Driefasig loont bij grote batterijen met hoge arbitrage-spread.</span>
             </div>
           </div>
 
@@ -1165,10 +1186,10 @@ export default function Optimizer() {
               borderRadius: 10, padding: '10px 16px', fontSize: 13, color: '#60a5fa',
               display: 'flex', gap: 16, alignItems: 'center',
             }}>
-              <span>📡</span>
+              <SignalIcon width={18} height={18} strokeWidth={2}/>
               <span>
                 <strong>{priceInfo.slots} slots</strong> geladen ({priceInfo.hours} uur · {horizonDays} dag{horizonDays > 1 ? 'en' : ''}) van ENTSO-E
-                {hasSolar && <span style={{ color: '#f59e0b', marginLeft: 8 }}>· ☀️ Solar forecast {solarKwp} kWp meegestuurd</span>}
+                {hasSolar && <span style={{ color: '#f59e0b', marginLeft: 8, display:'inline-flex', alignItems:'center', gap:4 }}>· <SunIcon width={13} height={13} strokeWidth={2}/> Solar forecast {solarKwp} kWp meegestuurd</span>}
               </span>
             </div>
           )}
@@ -1177,8 +1198,8 @@ export default function Optimizer() {
           {job && (
             <div className="card" style={{ padding: '16px 22px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ color: 'var(--text)', fontWeight: 600 }}>
-                  {hasSolar ? '☀️ MILP+Solar' : '🧮 MILP'} {jobId?.slice(0, 8)}…
+                <div style={{ color: 'var(--text)', fontWeight: 600, display:'flex', alignItems:'center', gap:6 }}>
+                  {hasSolar ? <SunIcon width={15} height={15} strokeWidth={2}/> : <CalculatorIcon width={15} height={15} strokeWidth={2}/>} {hasSolar ? 'MILP+Solar' : 'MILP'} {jobId?.slice(0, 8)}…
                 </div>
                 <StatusBadge status={job.status}/>
               </div>
@@ -1187,9 +1208,9 @@ export default function Optimizer() {
               )}
               {job.status === 'completed' && summary.solve_time_sec != null && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 16, fontSize: 12, color: 'var(--muted)' }}>
-                  <span>⏱ {summary.solve_time_sec}s</span>
-                  <span>🔁 {(summary.solver_iterations ?? 0).toLocaleString('nl-BE')} iteraties</span>
-                  <span>📐 {summary.num_slots ?? schedule.length} slots</span>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}><ClockIcon width={12} height={12} strokeWidth={2}/> {summary.solve_time_sec}s</span>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}><ArrowPathIcon width={12} height={12} strokeWidth={2}/> {(summary.solver_iterations ?? 0).toLocaleString('nl-BE')} iteraties</span>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}><ListBulletIcon width={12} height={12} strokeWidth={2}/> {summary.num_slots ?? schedule.length} slots</span>
                   <span style={{ color: (summary.status ?? '').toLowerCase().includes('optimal') ? '#22c55e' : '#f59e0b' }}>
                     {summary.status}
                   </span>
@@ -1205,8 +1226,8 @@ export default function Optimizer() {
           {jobBase && (
             <div className="card" style={{ padding: '12px 22px', borderColor: 'rgba(100,116,139,0.3)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ color: 'var(--muted)', fontWeight: 600, fontSize: 13 }}>
-                  🧮 MILP basis {jobIdBase?.slice(0, 8)}…
+                <div style={{ color: 'var(--muted)', fontWeight: 600, fontSize: 13, display:'flex', alignItems:'center', gap:6 }}>
+                  <CalculatorIcon width={14} height={14} strokeWidth={2}/> MILP basis {jobIdBase?.slice(0, 8)}…
                 </div>
                 <StatusBadge status={jobBase.status}/>
               </div>
@@ -1215,8 +1236,8 @@ export default function Optimizer() {
               )}
               {jobBase.status === 'completed' && summaryBase.solve_time_sec != null && (
                 <div style={{ marginTop: 6, display: 'flex', gap: 16, fontSize: 12, color: 'var(--muted)' }}>
-                  <span>⏱ {summaryBase.solve_time_sec}s</span>
-                  <span>🔁 {(summaryBase.solver_iterations ?? 0).toLocaleString('nl-BE')} iteraties</span>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}><ClockIcon width={12} height={12} strokeWidth={2}/> {summaryBase.solve_time_sec}s</span>
+                  <span style={{ display:'inline-flex', alignItems:'center', gap:4 }}><ArrowPathIcon width={12} height={12} strokeWidth={2}/> {(summaryBase.solver_iterations ?? 0).toLocaleString('nl-BE')} iteraties</span>
                   <span style={{ color: (summaryBase.status ?? '').toLowerCase().includes('optimal') ? '#22c55e' : '#f59e0b' }}>
                     {summaryBase.status}
                   </span>
@@ -1229,8 +1250,8 @@ export default function Optimizer() {
           {rbResult && !result && (
             <div className="card" style={{ padding: '20px 22px', border: '1px solid rgba(168,85,247,0.3)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-                <div className="card-title" style={{ margin: 0, color: '#a855f7' }}>
-                  📏 Regelgebaseerde simulatie
+                <div className="card-title" style={{ margin: 0, color: '#a855f7', display:'flex', alignItems:'center', gap:8 }}>
+                  <AdjustmentsHorizontalIcon width={17} height={17} strokeWidth={2}/> Regelgebaseerde simulatie
                 </div>
                 <span style={{ fontSize: 11, color: 'var(--muted)' }}>
                   ≤{rbChargeThr} / ≥{rbDischargeThr} €/MWh
@@ -1298,7 +1319,7 @@ export default function Optimizer() {
                 const capRh   = peakRh * CAP_EUR_KW_YEAR * periodFrac
 
                 const rhCol = rhResult
-                  ? { key: 'rh', label: '🔄 RH MILP', sub: `${horizonDays}× 2d venster`, color: '#10b981',
+                  ? { key: 'rh', label: <><ArrowPathIcon width={11} height={11} strokeWidth={2}/> RH MILP</>, sub: `${horizonDays}× 2d venster`, color: '#10b981',
                       rev: rhResult.summary.gross_revenue_eur,
                       cap: capRh, peak: peakRh,
                       net: rhResult.summary.gross_revenue_eur - capRh,
@@ -1307,15 +1328,15 @@ export default function Optimizer() {
 
                 const cols = show4
                   ? [
-                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur,     cap: capRb,   peak: peakRb,   net: rbResult.summary.gross_revenue_eur      - capRb,  soc: rbResult.summary.final_soc_pct,    cycles: rbResult.summary.partial_cycles,    solar: null },
-                      { key: 'rbSol', label: '📏+☀️ Regel+Solar',  sub: `${solarKwp} kWp`,                   color: '#f59e0b', rev: rbResultSolar.summary.gross_revenue_eur, cap: capRbS,  peak: peakRbS,  net: rbResultSolar.summary.gross_revenue_eur - capRbS, soc: rbResultSolar.summary.final_soc_pct, cycles: rbResultSolar.summary.partial_cycles, solar: rbResultSolar.summary.total_solar_kwh },
-                      { key: 'milp',  label: '🧮 MILP basis',      sub: 'HiGHS solver',                      color: '#64748b', rev: summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0, cap: capMilpB, peak: peakMilpB, net: summaryBase.total_net_revenue_eur ?? ((summaryBase.revenue_execute_eur ?? 0) - capMilpB), soc: summaryBase.final_soc_pct ?? 0, cycles: null, solar: null },
-                      { key: 'milpS', label: '🧮+☀️ MILP+Solar',  sub: `${solarKwp} kWp`,                   color: '#60a5fa', rev: milpGross ?? 0,                           cap: capMilpS, peak: peakMilpS, net: summary.total_net_revenue_eur ?? ((milpGross ?? 0) - capMilpS),                                                                   soc: summary.final_soc_pct ?? 0,   cycles: null, solar: summary.charge_solar_kwh },
+                      { key: 'rb',    label: <><AdjustmentsHorizontalIcon width={11} height={11} strokeWidth={2}/> Regelgebaseerd</>,  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur,     cap: capRb,   peak: peakRb,   net: rbResult.summary.gross_revenue_eur      - capRb,  soc: rbResult.summary.final_soc_pct,    cycles: rbResult.summary.partial_cycles,    solar: null },
+                      { key: 'rbSol', label: <><AdjustmentsHorizontalIcon width={11} height={11} strokeWidth={2}/><SunIcon width={11} height={11} strokeWidth={2}/> Regel+Solar</>,  sub: `${solarKwp} kWp`,                   color: '#f59e0b', rev: rbResultSolar.summary.gross_revenue_eur, cap: capRbS,  peak: peakRbS,  net: rbResultSolar.summary.gross_revenue_eur - capRbS, soc: rbResultSolar.summary.final_soc_pct, cycles: rbResultSolar.summary.partial_cycles, solar: rbResultSolar.summary.total_solar_kwh },
+                      { key: 'milp',  label: <><CalculatorIcon width={11} height={11} strokeWidth={2}/> MILP basis</>,      sub: 'HiGHS solver',                      color: '#64748b', rev: summaryBase.revenue_execute_eur ?? summaryBase.gross_revenue_eur ?? 0, cap: capMilpB, peak: peakMilpB, net: summaryBase.total_net_revenue_eur ?? ((summaryBase.revenue_execute_eur ?? 0) - capMilpB), soc: summaryBase.final_soc_pct ?? 0, cycles: null, solar: null },
+                      { key: 'milpS', label: <><CalculatorIcon width={11} height={11} strokeWidth={2}/><SunIcon width={11} height={11} strokeWidth={2}/> MILP+Solar</>,  sub: `${solarKwp} kWp`,                   color: '#60a5fa', rev: milpGross ?? 0,                           cap: capMilpS, peak: peakMilpS, net: summary.total_net_revenue_eur ?? ((milpGross ?? 0) - capMilpS),                                                                   soc: summary.final_soc_pct ?? 0,   cycles: null, solar: summary.charge_solar_kwh },
                       ...(rhCol ? [rhCol] : []),
                     ]
                   : [
-                      { key: 'milp',  label: '🧮 MILP Optimaal',   sub: 'HiGHS solver',                      color: '#60a5fa', rev: milpGross ?? 0, cap: capMilpS, peak: peakMilpS, net: summary.total_net_revenue_eur ?? ((milpGross ?? 0) - capMilpS), soc: summary.final_soc_pct ?? 0, cycles: null, solar: null },
-                      { key: 'rb',    label: '📏 Regelgebaseerd',  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur, cap: capRb, peak: peakRb, net: rbResult.summary.gross_revenue_eur - capRb, soc: rbResult.summary.final_soc_pct, cycles: rbResult.summary.partial_cycles, solar: null },
+                      { key: 'milp',  label: <><CalculatorIcon width={11} height={11} strokeWidth={2}/> MILP Optimaal</>,   sub: 'HiGHS solver',                      color: '#60a5fa', rev: milpGross ?? 0, cap: capMilpS, peak: peakMilpS, net: summary.total_net_revenue_eur ?? ((milpGross ?? 0) - capMilpS), soc: summary.final_soc_pct ?? 0, cycles: null, solar: null },
+                      { key: 'rb',    label: <><AdjustmentsHorizontalIcon width={11} height={11} strokeWidth={2}/> Regelgebaseerd</>,  sub: `≤${rbChargeThr}/≥${rbDischargeThr}`, color: '#a855f7', rev: rbResult.summary.gross_revenue_eur, cap: capRb, peak: peakRb, net: rbResult.summary.gross_revenue_eur - capRb, soc: rbResult.summary.final_soc_pct, cycles: rbResult.summary.partial_cycles, solar: null },
                       ...(rhCol ? [rhCol] : []),
                     ]
 
@@ -1334,7 +1355,7 @@ export default function Optimizer() {
                 return (
                   <div className="card" style={{ padding: '20px 22px', border: '1px solid rgba(168,85,247,0.25)', background: 'rgba(168,85,247,0.02)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                      <div className="card-title" style={{ margin: 0 }}>⚖️ Strategie Vergelijking</div>
+                      <div className="card-title" style={{ margin: 0, display:'flex', alignItems:'center', gap:8 }}><ScaleIcon width={17} height={17} strokeWidth={2}/> Strategie Vergelijking</div>
                       {horizonDays >= 7 && (
                         <button type="button" onClick={() => exportBacktestCSV(
                           horizonDays,
@@ -1346,8 +1367,8 @@ export default function Optimizer() {
                         )} style={{
                           background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)',
                           color: '#22c55e', borderRadius: 7, padding: '6px 12px', fontSize: 12,
-                          cursor: 'pointer', fontWeight: 600,
-                        }}>📊 Exporteer rapport (CSV)</button>
+                          cursor: 'pointer', fontWeight: 600, display:'inline-flex', alignItems:'center', gap:6,
+                        }}><ChartBarIcon width={14} height={14} strokeWidth={2}/> Exporteer rapport (CSV)</button>
                       )}
                     </div>
 
@@ -1362,10 +1383,10 @@ export default function Optimizer() {
                           borderRadius: 8, padding: '8px 6px', textAlign: 'center',
                           outline: (c.net ?? c.rev) === maxNet && maxNet > 0 ? `2px solid ${c.color}` : 'none',
                         }}>
-                          <div style={{ color: c.color, fontWeight: 700, fontSize: 11 }}>{c.label}</div>
+                          <div style={{ color: c.color, fontWeight: 700, fontSize: 11, display:'flex', alignItems:'center', justifyContent:'center', gap:3 }}>{c.label}</div>
                           <div style={{ color: 'var(--muted)', fontSize: 9, marginTop: 1 }}>{c.sub}</div>
                           {(c.net ?? c.rev) === maxNet && maxNet > 0 && (
-                            <div style={{ color: '#22c55e', fontSize: 9, marginTop: 2, fontWeight: 700 }}>🏆 best</div>
+                            <div style={{ color: '#22c55e', fontSize: 9, marginTop: 2, fontWeight: 700, display:'flex', alignItems:'center', justifyContent:'center', gap:3 }}><TrophyIcon width={10} height={10} strokeWidth={2}/> best</div>
                           )}
                         </div>
                       ))}
@@ -1432,8 +1453,8 @@ export default function Optimizer() {
                           borderRadius: 8, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                         }}>
                           <div>
-                            <div style={{ color: '#22c55e', fontWeight: 700, fontSize: 13 }}>
-                              🏆 {best.label} scoort het best — +€{gain.toFixed(3)} ({pct.toFixed(1)}%) vs {worst.label}
+                            <div style={{ color: '#22c55e', fontWeight: 700, fontSize: 13, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+                              <TrophyIcon width={14} height={14} strokeWidth={2}/> <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}>{best.label}</span> scoort het best — +€{gain.toFixed(3)} ({pct.toFixed(1)}%) vs <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}>{worst.label}</span>
                             </div>
                             <div style={{ color: 'var(--muted)', fontSize: 11, marginTop: 2 }}>
                               {show4
@@ -1448,8 +1469,8 @@ export default function Optimizer() {
                       )
                     })()}
 
-                    <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 10 }}>
-                      ℹ️ Capaciteitstarief = piek netafname (kW) × €{CAP_EUR_KW_YEAR}/kW/jaar × {horizonDays} dag{horizonDays !== 1 ? 'en' : ''} / 365. De maatstaf is de hoogste 15-min vermogenspiek die van het net wordt geladen.
+                    <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 10, display:'flex', alignItems:'flex-start', gap:4 }}>
+                      <InformationCircleIcon width={12} height={12} strokeWidth={2} style={{ flexShrink:0, marginTop:1 }}/> Capaciteitstarief = piek netafname (kW) × €{CAP_EUR_KW_YEAR}/kW/jaar × {horizonDays} dag{horizonDays !== 1 ? 'en' : ''} / 365. De maatstaf is de hoogste 15-min vermogenspiek die van het net wordt geladen.
                       {show4 && ' Solar PV: regelgebaseerd laadt via solar als er ruimte is; MILP optimaliseert globaal.'}
                       {horizonDays >= 7 && ' · Klik "Exporteer rapport" voor dagelijks CSV-overzicht.'}
                     </div>
@@ -1468,7 +1489,7 @@ export default function Optimizer() {
               {rhProgress && (
                 <div className="card" style={{ padding: '14px 22px', border: '1px solid rgba(16,185,129,0.3)', background: 'rgba(16,185,129,0.04)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <div style={{ fontSize: 18 }}>🔄</div>
+                    <ArrowPathIcon width={18} height={18} strokeWidth={2} style={{ color:'#10b981' }}/>
                     <div style={{ flex: 1 }}>
                       <div style={{ color: '#10b981', fontWeight: 600, fontSize: 13 }}>
                         Rolling Horizon MILP — dag {rhProgress.current} van {rhProgress.total}
@@ -1496,7 +1517,7 @@ export default function Optimizer() {
               {/* ── SOC & Cumulatieve opbrengst vergelijkingsgrafieken ── */}
               {compChartData.length > 0 && (
                 <div className="card">
-                  <div className="card-title">📈 SOC & Cumulatieve Opbrengst (per uur)</div>
+                  <div className="card-title" style={{ display:'flex', alignItems:'center', gap:8 }}><ArrowTrendingUpIcon width={17} height={17} strokeWidth={2}/> SOC & Cumulatieve Opbrengst (per uur)</div>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                     <div>
                       <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 6 }}>State of Charge (%)</div>
@@ -1572,8 +1593,8 @@ export default function Optimizer() {
                 return (
                   <div className="card" style={{ padding: '16px 20px' }}>
                     <div style={{ color: 'var(--muted)', fontSize: 11, fontWeight: 600,
-                      textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>
-                      📅 Opbrengst per dag
+                      textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10, display:'flex', alignItems:'center', gap:6 }}>
+                      <CalendarDaysIcon width={13} height={13} strokeWidth={2}/> Opbrengst per dag
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: `repeat(${numDays}, 1fr)`, gap: 8 }}>
                       {Array.from({ length: numDays }, (_, d) => {
@@ -1599,8 +1620,10 @@ export default function Optimizer() {
                             }}>
                               €{dayGross.toFixed(3)}
                             </div>
-                            <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 4 }}>
-                              🔵 {chSlots} laden · 🟢 {disSlots} ontladen
+                            <div style={{ color: 'var(--muted2)', fontSize: 10, marginTop: 4, display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                              <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}><span style={{ width:7, height:7, borderRadius:'50%', background:'#3b82f6', display:'inline-block' }}/> {chSlots} laden</span>
+                              <span>·</span>
+                              <span style={{ display:'inline-flex', alignItems:'center', gap:3 }}><span style={{ width:7, height:7, borderRadius:'50%', background:'#22c55e', display:'inline-block' }}/> {disSlots} ontladen</span>
                             </div>
                           </div>
                         )
@@ -1659,8 +1682,8 @@ export default function Optimizer() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <span style={{ color: 'var(--muted)', fontSize: 14, transition: 'transform 0.2s',
                         display: 'inline-block', transform: schedOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
-                      <span className="card-title" style={{ margin: 0 }}>
-                        📋 Kwartier Schema MILP
+                      <span className="card-title" style={{ margin: 0, display:'inline-flex', alignItems:'center', gap:8 }}>
+                        <ClipboardDocumentListIcon width={16} height={16} strokeWidth={2}/> Kwartier Schema MILP
                       </span>
                       <span style={{ color: 'var(--muted)', fontSize: 12 }}>
                         {schedule.length} slots
@@ -1675,7 +1698,7 @@ export default function Optimizer() {
                         fontSize: 11, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
                       }}
                     >
-                      📥 Exporteer CSV
+                      <ArrowDownTrayIcon width={13} height={13} strokeWidth={2}/> Exporteer CSV
                     </button>
                   </div>
 
@@ -1728,7 +1751,7 @@ export default function Optimizer() {
           {/* ── Feature #30/#31: Battery Sizing Advisor ── */}
           <div className="card" style={{ padding: '20px 22px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div className="card-title" style={{ margin: 0 }}>🔭 Battery Sizing Advisor</div>
+              <div className="card-title" style={{ margin: 0, display:'flex', alignItems:'center', gap:8 }}><MagnifyingGlassIcon width={17} height={17} strokeWidth={2}/> Battery Sizing Advisor</div>
               <button
                 type="button"
                 onClick={handleSizingAnalyse}
@@ -1736,7 +1759,7 @@ export default function Optimizer() {
                 className="btn btn-primary"
                 style={{ padding: '6px 14px', fontSize: 12 }}
               >
-                {sizingLoading ? '⚙️ Berekenen…' : '▶ Analyseer'}
+                {sizingLoading ? <span style={{ display:'inline-flex', alignItems:'center', gap:5 }}><Cog6ToothIcon width={13} height={13} strokeWidth={2}/> Berekenen…</span> : '▶ Analyseer'}
               </button>
             </div>
             <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
@@ -1745,14 +1768,16 @@ export default function Optimizer() {
             </div>
 
             {sizingError && (
-              <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8 }}>⚠️ {sizingError}</div>
+              <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 8, display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={13} height={13} strokeWidth={2}/> {sizingError}</div>
             )}
 
             {sizingLoading && (
               <div style={{ marginBottom: 12 }}>
                 {/* Label */}
-                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
-                  {sizingMessage || '⏳ Bezig…'}
+                <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6, display:'flex', alignItems:'center', gap:6 }}>
+                  {sizingMessage
+                    ? <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>{sizingMessage}</span>
+                    : <><ClockIcon width={13} height={13} strokeWidth={2}/> Bezig…</>}
                 </div>
                 {/* Progress bar */}
                 <div style={{
@@ -1784,8 +1809,8 @@ export default function Optimizer() {
               return (
                 <>
                   {/* Datumrange label */}
-                  <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
-                    📅 Gebaseerd op {daysAnalyzed} dagen ({startDate} → {endDate}) · geannualiseerd naar 1 jaar
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8, display:'flex', alignItems:'center', gap:6 }}>
+                    <CalendarDaysIcon width={13} height={13} strokeWidth={2}/> Gebaseerd op {daysAnalyzed} dagen ({startDate} → {endDate}) · geannualiseerd naar 1 jaar
                   </div>
 
                   {/* Staafgrafiek: jaaropbrengst + €/kWh */}
@@ -1825,8 +1850,8 @@ export default function Optimizer() {
                       background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.25)',
                       borderRadius: 8, padding: '10px 12px',
                     }}>
-                      <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
-                        🏆 Beste €/kWh rendement
+                      <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4, display:'flex', alignItems:'center', gap:5 }}>
+                        <TrophyIcon width={13} height={13} strokeWidth={2}/> Beste €/kWh rendement
                       </div>
                       <div style={{ color: '#f97316', fontSize: 18, fontWeight: 700 }}>
                         {bestEff.battery_kwh} kWh
@@ -1840,8 +1865,8 @@ export default function Optimizer() {
                       background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.2)',
                       borderRadius: 8, padding: '10px 12px',
                     }}>
-                      <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4 }}>
-                        ⚙️ Huidige instelling
+                      <div style={{ color: 'var(--muted)', fontSize: 11, marginBottom: 4, display:'flex', alignItems:'center', gap:5 }}>
+                        <Cog6ToothIcon width={13} height={13} strokeWidth={2}/> Huidige instelling
                       </div>
                       {current ? (
                         <>

@@ -5,6 +5,14 @@ import {
 } from 'recharts'
 import { fetchDayAhead, fetchTomorrowStatus } from '../api'
 import { format, parseISO, addDays, startOfDay } from 'date-fns'
+import {
+  BoltIcon, CalendarDaysIcon, ExclamationTriangleIcon, CheckCircleIcon,
+  ClockIcon, ArrowPathIcon, BanknotesIcon,
+} from '@heroicons/react/24/outline'
+
+const Icn = ({ Icon, size = 14, style }) => (
+  <Icon width={size} height={size} strokeWidth={2} style={{ display:'inline', verticalAlign:'-2px', ...style }}/>
+)
 
 const fmt  = (ts) => { try { return format(parseISO(ts), 'dd/MM HH:mm') } catch { return ts } }
 const fmtH = (ts) => { try { return format(parseISO(ts), 'HH:mm') }       catch { return ts } }
@@ -164,10 +172,10 @@ export default function Prices() {
       </span>
     )
     if (nowHour < 12) return (
-      <span style={{ color:'var(--muted)', fontSize:12 }}>⏰ Verwacht na 13:00 CET</span>
+      <span style={{ color:'var(--muted)', fontSize:12, display:'flex', alignItems:'center', gap:5 }}><Icn Icon={ClockIcon}/> Verwacht na 13:00 CET</span>
     )
     return (
-      <span style={{ color:'#f97316', fontSize:12 }}>⚠️ Vertraagd — we blijven controleren</span>
+      <span style={{ color:'#f97316', fontSize:12, display:'flex', alignItems:'center', gap:5 }}><Icn Icon={ExclamationTriangleIcon}/> Vertraagd — we blijven controleren</span>
     )
   })()
 
@@ -220,12 +228,12 @@ export default function Prices() {
     <div>
       <div className="page-header" style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
         <div>
-          <div className="page-title">⚡ Dag-ahead Prijzen</div>
+          <div className="page-title" style={{ display:'flex', alignItems:'center', gap:8 }}><BoltIcon width={22} height={22} strokeWidth={2}/> Dag-ahead Prijzen</div>
           <div className="page-sub">ENTSO-E Belgische elektriciteitsmarkt</div>
         </div>
         <div style={{ textAlign:'right', paddingTop:2 }}>
-          <div style={{ color:'var(--text)', fontWeight:600, fontSize:14 }}>
-            📅 {new Date().toLocaleDateString('nl-BE', { weekday:'long', day:'numeric', month:'long', year:'numeric' })}
+          <div style={{ color:'var(--text)', fontWeight:600, fontSize:14, display:'flex', alignItems:'center', gap:6, justifyContent:'flex-end' }}>
+            <CalendarDaysIcon width={15} height={15} strokeWidth={2}/> {new Date().toLocaleDateString('nl-BE', { weekday:'long', day:'numeric', month:'long', year:'numeric' })}
           </div>
           <div style={{ color:'var(--muted)', fontSize:12, marginTop:2 }}>
             Periode: laatste {days} dag{days !== 1 ? 'en' : ''}
@@ -253,7 +261,7 @@ export default function Prices() {
         <div className="kpi">
           <div className="kpi-label">Negatieve uren</div>
           <div className={`kpi-value ${negCount > 0 ? 'positive' : 'neutral'}`}>{negCount}</div>
-          <div className="kpi-sub">gratis laden 🔋</div>
+          <div className="kpi-sub" style={{ display:'flex', alignItems:'center', gap:4 }}>gratis laden <BoltIcon width={12} height={12} strokeWidth={2}/></div>
         </div>
       </div>
 
@@ -271,7 +279,7 @@ export default function Prices() {
               borderRadius:8, padding:'12px 16px', marginBottom:16,
               display:'flex', alignItems:'center', gap:12,
             }}>
-              <span style={{ fontSize:22 }}>✅</span>
+              <CheckCircleIcon width={22} height={22} strokeWidth={2} style={{ color:'#22c55e', flexShrink:0 }}/>
               <div>
                 <div style={{ color:'#22c55e', fontWeight:700, fontSize:14 }}>
                   Morgen-prijzen zijn net beschikbaar!
@@ -322,7 +330,7 @@ export default function Prices() {
                 {bestCharge && (
                   <div style={{ background:'rgba(34,197,94,0.08)', borderRadius:8, padding:'12px 14px',
                     border:'1px solid rgba(34,197,94,0.22)' }}>
-                    <div style={{ color:'var(--muted)', fontSize:11, marginBottom:5 }}>🔋 Beste laaduur</div>
+                    <div style={{ color:'var(--muted)', fontSize:11, marginBottom:5, display:'flex', alignItems:'center', gap:4 }}><BoltIcon width={13} height={13} strokeWidth={2}/> Beste laaduur</div>
                     <div style={{ color:'#22c55e', fontWeight:700, fontSize:17 }}>
                       {fmtH(bestCharge.ts)} – {fmtH(bestCharge.end)}
                     </div>
@@ -334,7 +342,7 @@ export default function Prices() {
                 {bestSell && (
                   <div style={{ background:'rgba(249,115,22,0.08)', borderRadius:8, padding:'12px 14px',
                     border:'1px solid rgba(249,115,22,0.22)' }}>
-                    <div style={{ color:'var(--muted)', fontSize:11, marginBottom:5 }}>💰 Beste ontlaaduur</div>
+                    <div style={{ color:'var(--muted)', fontSize:11, marginBottom:5, display:'flex', alignItems:'center', gap:4 }}><BanknotesIcon width={13} height={13} strokeWidth={2}/> Beste ontlaaduur</div>
                     <div style={{ color:'#f97316', fontWeight:700, fontSize:17 }}>
                       {fmtH(bestSell.ts)} – {fmtH(bestSell.end)}
                     </div>
@@ -372,9 +380,9 @@ export default function Prices() {
       <div className="card">
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:16 }}>
           <div>
-            <div className="card-title" style={{ margin:0 }}>
-              {rolling     ? '↻ Rolling horizon — 48u venster'
-               : days === 1 ? `⚡ Vandaag — ${todayDate}`
+            <div className="card-title" style={{ margin:0, display:'flex', alignItems:'center', gap:6 }}>
+              {rolling     ? <><ArrowPathIcon width={15} height={15} strokeWidth={2}/> Rolling horizon — 48u venster</>
+               : days === 1 ? <><BoltIcon width={15} height={15} strokeWidth={2}/> Vandaag — {todayDate}</>
                :              'Historisch prijsverloop'}
             </div>
             {rolling && (
@@ -410,7 +418,7 @@ export default function Prices() {
           </div>
         </div>
         {loading && <div className="loading">Data ophalen…</div>}
-        {error   && <div className="error">⚠️ {error}</div>}
+        {error   && <div className="error" style={{ display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={15} height={15} strokeWidth={2}/> {error}</div>}
         {!loading && !error && (
           <ResponsiveContainer width="100%" height={320}>
             {rolling ? (

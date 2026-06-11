@@ -69,11 +69,18 @@ Recharts SVG kan geen CSS vars → gebruik concrete hex: `rgba(100,116,139,0.25)
 | 37 | Rolling Horizon MILP: N×2-dag MILP runs, SOC-koppeling, 5e kolom in vergelijkingstabel, voortgangsbalk | (post-36) |
 | 38 | Capaciteitstarief per strategie: Piek netafname (kW) + cap kost (−€) + netto rij in Strategie Vergelijking; 🏆 ranking op netto | f97c6a7 |
 
+## Recente fixes (deze sessie)
+| Fix | Omschrijving | Commit |
+|-----|-------------|--------|
+| RH SOC-ketening | Tussenliggende RH-vensters gebruiken min_end_soc=min_soc zodat solver vrij de optimale overdrachts-SOC kiest | 6ff9e1d |
+| endSoc slider verwijderd | MILP beslist eind-SOC zelf; Min eind-SOC slider was niet relevant voor MILP | ff00838 |
+| D+1 uit backtest | Bij horizonDays > 1: filter morgendata uit zodat backtest strikt historisch blijft | d433d1c |
+
 ## Openstaande features
-| # | Feature | Omschrijving |
-|---|---------|-------------|
-| 21 | Scenario vergelijking | Grotendeels afgedekt door #20-vergelijkingskaart; aparte pagina wellicht niet nodig |
-| - | Multi-dag MILP horizon | Optimizer over meerdere dagen i.p.v. 1 dag |
+Geen bekende open punten. Alle geplande features zijn afgewerkt:
+- #21 Scenario vergelijking → afgedekt door Strategie Vergelijking-tabel (#35 + #38)
+- #22 Gisteren's SOC → geïmplementeerd in commit 9832c1c
+- Multi-dag MILP horizon → afgedekt door 7/14/30/90/180/365d backtesting (#34) + Rolling Horizon (#37)
 
 ## Stijl & UX-principes
 - Altijd streven naar beste gebruikerservaring

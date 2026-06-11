@@ -22,8 +22,17 @@ export const triggerTomorrowCheck = () =>
 export const fetchImbalance = (date) =>
   api.get('/api/elia/imbalance', { params: { date } }).then(r => r.data)
 
+export const fetchLiveImbalance = (date) =>
+  api.get('/api/elia/live-imbalance', { params: { date } }).then(r => r.data)
+
 export const fetchSolarWind = (date) =>
   api.get('/api/elia/solar-wind', { params: { date } }).then(r => r.data)
+
+export const fetchSolarForecast = (date) =>
+  api.get('/api/elia/solar-forecast', { params: { date } }).then(r => r.data)
+
+export const fetchWindForecast = (date) =>
+  api.get('/api/elia/wind-forecast', { params: { date } }).then(r => r.data)
 
 // MILP Optimalisatie
 export const runOptimization = (payload) =>

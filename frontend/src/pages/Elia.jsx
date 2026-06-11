@@ -8,14 +8,18 @@ import {
   fetchSolarWind, fetchSolarForecast, fetchWindForecast,
 } from '../api'
 import { format, parseISO } from 'date-fns'
+import {
+  ScaleIcon, BoltIcon, SunIcon, CloudIcon, SignalIcon,
+  ExclamationTriangleIcon, GlobeAltIcon,
+} from '@heroicons/react/24/outline'
 
 const toDateStr = (d) => format(d, 'yyyy-MM-dd')
 
 const TABS = [
-  { id: 'imbal',    label: '⚖️ Onbalans 15-min' },
-  { id: 'live',     label: '⚡ Live 5-min' },
-  { id: 'zonwind',  label: '☀️🌬️ Zon & Wind' },
-  { id: 'prognose', label: '📡 Prognose vs Realisatie' },
+  { id: 'imbal',    label: 'Onbalans 15-min',       icon: ScaleIcon },
+  { id: 'live',     label: 'Live 5-min',            icon: BoltIcon },
+  { id: 'zonwind',  label: 'Zon & Wind',            icon: SunIcon },
+  { id: 'prognose', label: 'Prognose vs Realisatie', icon: SignalIcon },
 ]
 
 const CustomTooltip = ({ active, payload, label }) => {
@@ -89,7 +93,7 @@ function TabImbalance({ date }) {
         </div>
       </div>
       {loading && <div className="loading">Elia data ophalen…</div>}
-      {error   && <div className="error">⚠️ {error}</div>}
+      {error   && <div className="error" style={{ display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={15} height={15} strokeWidth={2}/> {error}</div>}
       {!loading && !error && chart.length > 0 && (
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={chart} margin={{ top:4, right:50, bottom:0, left:0 }}>
@@ -109,12 +113,12 @@ function TabImbalance({ date }) {
       {!loading && !error && chart.length === 0 && (
         <div style={{ background:'rgba(245,158,11,0.08)', border:'1px solid rgba(245,158,11,0.3)',
           borderRadius:10, padding:'16px 20px', color:'var(--text)' }}>
-          <div style={{ fontWeight:600, marginBottom:6 }}>
-            ⚠️ Geen gevalideerde data voor {date}
+          <div style={{ fontWeight:600, marginBottom:6, display:'flex', alignItems:'center', gap:6 }}>
+            <ExclamationTriangleIcon width={16} height={16} strokeWidth={2}/> Geen gevalideerde data voor {date}
           </div>
           <div style={{ fontSize:13, color:'var(--muted)', lineHeight:1.6 }}>
             Dataset ods047 bevat gevalideerde 15-min onbalansdata tot en met <strong>21 mei 2024</strong>.
-            Voor actuele data van vandaag, gebruik de tab <strong>⚡ Live 5-min</strong>.
+            Voor actuele data van vandaag, gebruik de tab <strong>Live 5-min</strong>.
           </div>
         </div>
       )}
@@ -165,7 +169,7 @@ function TabLive({ date }) {
         </div>
       </div>
       {loading && <div className="loading">Elia real-time data ophalen…</div>}
-      {error   && <div className="error">⚠️ {error}</div>}
+      {error   && <div className="error" style={{ display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={15} height={15} strokeWidth={2}/> {error}</div>}
       {!loading && !error && chart.length > 0 && (
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={chart} margin={{ top:4, right:50, bottom:0, left:0 }}>
@@ -229,7 +233,7 @@ function TabZonWind({ date }) {
         </div>
       </div>
       {loading && <div className="loading">Elia data ophalen…</div>}
-      {error   && <div className="error">⚠️ {error}</div>}
+      {error   && <div className="error" style={{ display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={15} height={15} strokeWidth={2}/> {error}</div>}
       {!loading && !error && chart.length > 0 && (
         <ResponsiveContainer width="100%" height={280}>
           <AreaChart data={chart} margin={{ top:4, right:8, bottom:0, left:0 }}>
@@ -292,13 +296,13 @@ function TabPrognose({ date }) {
   return (
     <>
       {loading && <div className="loading">Elia prognosedata ophalen…</div>}
-      {error   && <div className="error">⚠️ {error}</div>}
+      {error   && <div className="error" style={{ display:'flex', alignItems:'center', gap:6 }}><ExclamationTriangleIcon width={15} height={15} strokeWidth={2}/> {error}</div>}
 
       {/* Zon: prognose vs gemeten */}
       {!loading && solarChart.length > 0 && (
         <div style={{ marginBottom:24 }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-            <div style={{ fontWeight:600, color:'var(--text)', fontSize:14 }}>☀️ Zonne-energie — prognose vs realisatie</div>
+            <div style={{ fontWeight:600, color:'var(--text)', fontSize:14, display:'flex', alignItems:'center', gap:6 }}><SunIcon width={16} height={16} strokeWidth={2}/> Zonne-energie — prognose vs realisatie</div>
             <div style={{ fontSize:12, color:'var(--muted)' }}>
               Gem. afwijking: <span style={{ color:'#f59e0b', fontWeight:700 }}>{solarMAE} MW</span>
             </div>
@@ -320,8 +324,8 @@ function TabPrognose({ date }) {
       {/* Wind: prognose vs gemeten */}
       {!loading && windChart.length > 0 && (
         <div>
-          <div style={{ fontWeight:600, color:'var(--text)', fontSize:14, marginBottom:8 }}>
-            🌬️ Wind — prognose vs realisatie
+          <div style={{ fontWeight:600, color:'var(--text)', fontSize:14, marginBottom:8, display:'flex', alignItems:'center', gap:6 }}>
+            <CloudIcon width={16} height={16} strokeWidth={2}/> Wind — prognose vs realisatie
           </div>
           <ResponsiveContainer width="100%" height={220}>
             <LineChart data={windChart} margin={{ top:4, right:8, bottom:0, left:0 }}>
@@ -354,7 +358,7 @@ export default function Elia() {
   return (
     <div>
       <div className="page-header">
-        <div className="page-title">🌿 Elia Netwerkdata</div>
+        <div className="page-title" style={{ display:'flex', alignItems:'center', gap:8 }}><GlobeAltIcon width={22} height={22} strokeWidth={2}/> Elia Netwerkdata</div>
         <div className="page-sub">Belgisch transmissienet — onbalans, hernieuwbare productie en prognoses</div>
       </div>
 
@@ -389,7 +393,9 @@ export default function Elia() {
               whiteSpace:'nowrap', transition:'color 0.15s',
             }}
           >
-            {tab.label}
+            <span style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <tab.icon width={15} height={15} strokeWidth={2}/> {tab.label}
+            </span>
           </button>
         ))}
       </div>
